@@ -231,7 +231,7 @@ const App = () => {
 
   return (
     <div className="flex flex-col h-screen w-screen bg-white text-gray-800 overflow-hidden font-sans">
-      <header className="h-[100px] bg-white border-b border-gray-200 flex items-center px-6 md:px-6 shrink-0 shadow-sm">
+      <header className="h-[70px] bg-white border-b border-gray-200 flex items-center px-6 md:px-6 shrink-0 shadow-sm">
         <div className="w-full max-w-[1200px] mx-auto flex items-center">
           <div className="flex items-center">
             <div className="flex items-baseline gap-1 font-semibold tracking-tight">
@@ -239,7 +239,7 @@ const App = () => {
                 src={mitLogo}
                 alt="MIT Logo"
                 width={200}
-                className="h-[100px]"
+                className="h-[70px]"
               />
             </div>
           </div>
@@ -276,14 +276,14 @@ const App = () => {
                 />
               </div>
               <div className="flex-1">
-              <button
-                type="button"
-                className="mx-auto block bg-mit-red text-white border-none rounded-full w-6 h-6 cursor-pointer text-lg leading-none flex items-center justify-center transition-all shadow-md hover:bg-[#c0392b] hover:scale-110"
-                onClick={handleRemoveImage}
-                aria-label="移除圖片"
-              >
-                ×
-              </button>
+                <button
+                  type="button"
+                  className="mx-auto block bg-mit-red text-white border-none rounded-full w-6 h-6 cursor-pointer text-lg leading-none flex items-center justify-center transition-all shadow-md hover:bg-[#c0392b] hover:scale-110"
+                  onClick={handleRemoveImage}
+                  aria-label="移除圖片"
+                >
+                  ×
+                </button>
               </div>
             </div>
           )}
