@@ -1,0 +1,15 @@
+
+torch>=2.0.0
+torchvision>=0.15.0
+
+# 預訓練模型庫
+timm>=0.9.0
+
+# 圖像處理
+Pillow>=9.0.0
+numpy>=1.21.0
+
+# 如果需要 CUDA 支持，請根據你的 CUDA 版本安裝對應的 PyTorch
+# CUDA 11.8: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+# CUDA 12.1: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# CPU 版本: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
