@@ -34,3 +34,5 @@ dist-electron
 *.h5
 *.weights
 *.ckpt
+*__pycache__/
+*.pytest_cache/
