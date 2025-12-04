@@ -26,6 +26,22 @@ const App = () => {
   const [isCameraOpen, setIsCameraOpen] = useState<boolean>(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  
+  // 記憶管理：生成並保存 user_id 和 session_id
+  const [userId] = useState<string>(() => {
+    // 從 localStorage 獲取或生成新的 user_id
+    let storedUserId = localStorage.getItem("tongue_ai_user_id");
+    if (!storedUserId) {
+      storedUserId = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      localStorage.setItem("tongue_ai_user_id", storedUserId);
+    }
+    return storedUserId;
+  });
+  
+  const [sessionId] = useState<string>(() => {
+    // 每次應用啟動時生成新的 session_id（會話記憶）
+    return `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  });
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -100,6 +116,8 @@ const App = () => {
           {
             imageFile: imageUrl,
             additional_info: userMessage || undefined,
+            user_id: userId,
+            session_id: sessionId,
           },
           (chunk: string) => {
             accumulatedText += chunk;
@@ -164,7 +182,11 @@ const App = () => {
         const prompt = userMessage;
 
         const cleanup = await makeStreamRequest(
-          { prompt },
+          { 
+            prompt,
+            user_id: userId,
+            session_id: sessionId,
+          },
           (chunk: string) => {
             accumulatedText += chunk;
             setChatLog((prev) => {

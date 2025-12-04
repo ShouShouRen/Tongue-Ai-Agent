@@ -2,16 +2,16 @@ import { contextBridge, ipcRenderer } from "electron";
 
 // 暴露安全的 API 給渲染進程
 contextBridge.exposeInMainWorld("electronAPI", {
-  sendChatMessage: (prompt: string) => ipcRenderer.invoke("rag-chat", prompt),
-  sendChatMessageStream: (prompt: string, onChunk: (chunk: string) => void, onComplete: () => void, onError: (error: string) => void) => {
+  sendChatMessage: (prompt: string, userId?: string, sessionId?: string) => ipcRenderer.invoke("rag-chat", prompt, userId, sessionId),
+  sendChatMessageStream: (prompt: string, userId?: string, sessionId?: string, onChunk?: (chunk: string) => void, onComplete?: () => void, onError?: (error: string) => void) => {
     // 监听流式数据
     const handleChunk = (_event: any, data: { type: 'chunk' | 'done' | 'error', content?: string, error?: string }) => {
-      if (data.type === 'chunk' && data.content) {
+      if (data.type === 'chunk' && data.content && onChunk) {
         onChunk(data.content);
-      } else if (data.type === 'done') {
+      } else if (data.type === 'done' && onComplete) {
         ipcRenderer.removeListener('rag-chat-stream-chunk', handleChunk);
         onComplete();
-      } else if (data.type === 'error' && data.error) {
+      } else if (data.type === 'error' && data.error && onError) {
         ipcRenderer.removeListener('rag-chat-stream-chunk', handleChunk);
         onError(data.error);
       }
@@ -20,7 +20,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on('rag-chat-stream-chunk', handleChunk);
     
     // 发送流式请求
-    ipcRenderer.send('rag-chat-stream', prompt);
+    ipcRenderer.send('rag-chat-stream', prompt, userId, sessionId);
     
     // 返回清理函数
     return () => {

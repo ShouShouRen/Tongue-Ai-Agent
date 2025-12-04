@@ -16,16 +16,18 @@ export interface TonguePredictionResults {
 }
 
 export interface ElectronAPI {
-  sendChatMessage: (prompt: string) => Promise<{
+  sendChatMessage: (prompt: string, userId?: string, sessionId?: string) => Promise<{
     success: boolean;
     data?: string;
     error?: string;
   }>;
   sendChatMessageStream: (
     prompt: string,
-    onChunk: (chunk: string) => void,
-    onComplete: () => void,
-    onError: (error: string) => void
+    userId?: string,
+    sessionId?: string,
+    onChunk?: (chunk: string) => void,
+    onComplete?: () => void,
+    onError?: (error: string) => void
   ) => () => void;
   sendTongueAnalysis: (
     predictionResults: TonguePredictionResults | Record<string, unknown>,

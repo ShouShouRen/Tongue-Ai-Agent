@@ -2,6 +2,8 @@ import type { TonguePredictionResults } from "../types/electron";
 
 interface PromptRequest {
   prompt: string;
+  user_id?: string;
+  session_id?: string;
 }
 
 interface PromptResponse {
@@ -11,6 +13,8 @@ interface PromptResponse {
 interface TongueAnalysisRequest {
   prediction_results: TonguePredictionResults | Record<string, unknown>;
   additional_info?: string;
+  user_id?: string;
+  session_id?: string;
 }
 
 const isElectron = () => {
@@ -29,6 +33,8 @@ const makeBrowserRequest = async (
     },
     body: JSON.stringify({
       prompt: message.prompt,
+      user_id: message.user_id,
+      session_id: message.session_id,
     }),
   });
 
@@ -52,7 +58,11 @@ const makeElectronRequest = async (
     throw new Error("Electron API 不可用");
   }
 
-  const response = await window.electronAPI.sendChatMessage(message.prompt);
+  const response = await window.electronAPI.sendChatMessage(
+    message.prompt,
+    message.user_id,
+    message.session_id
+  );
 
   if (!response.success) {
     throw new Error(response.error || "API 請求失敗");
@@ -83,6 +93,8 @@ export const makeStreamRequest = async (
     const electronAPI = window.electronAPI;
     return electronAPI.sendChatMessageStream(
       message.prompt,
+      message.user_id,
+      message.session_id,
       onChunk,
       onComplete,
       onError
@@ -96,6 +108,8 @@ export const makeStreamRequest = async (
         },
         body: JSON.stringify({
           prompt: message.prompt,
+          user_id: message.user_id,
+          session_id: message.session_id,
         }),
       });
 
@@ -207,7 +221,12 @@ const makeBrowserTongueAnalysis = async (
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(request),
+    body: JSON.stringify({
+      prediction_results: request.prediction_results,
+      additional_info: request.additional_info,
+      user_id: request.user_id,
+      session_id: request.session_id,
+    }),
   });
 
   if (!response.ok) {
@@ -257,6 +276,8 @@ export const analyzeTongue = async (
 interface ImagePredictRequest {
   imageFile: File | string;
   additional_info?: string;
+  user_id?: string;
+  session_id?: string;
 }
 
 const makeBrowserImagePredictAndAnalyze = async (
@@ -297,6 +318,14 @@ const makeBrowserImagePredictAndAnalyze = async (
 
     if (request.additional_info) {
       formData.append("additional_info", request.additional_info);
+    }
+    
+    if (request.user_id) {
+      formData.append("user_id", request.user_id);
+    }
+    
+    if (request.session_id) {
+      formData.append("session_id", request.session_id);
     }
 
     const response = await fetch(
@@ -488,6 +517,14 @@ const makeBrowserAgentChat = async (
         "prompt",
         request.prompt || request.additional_info || ""
       );
+    }
+    
+    if (request.user_id) {
+      formData.append("user_id", request.user_id);
+    }
+    
+    if (request.session_id) {
+      formData.append("session_id", request.session_id);
     }
 
     const response = await fetch(`${FASTAPI_URL}/agent/chat/stream`, {

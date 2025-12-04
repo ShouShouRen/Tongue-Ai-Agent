@@ -139,7 +139,7 @@ ipcMain.handle("rag-chat", async (_event, prompt: string) => {
   }
 });
 
-ipcMain.on("rag-chat-stream", async (event: IpcMainEvent, prompt: string) => {
+ipcMain.on("rag-chat-stream", async (event: IpcMainEvent, prompt: string, userId?: string, sessionId?: string) => {
   try {
     if (!prompt || prompt.trim().length === 0) {
       event.sender.send("rag-chat-stream-chunk", {
@@ -156,6 +156,8 @@ ipcMain.on("rag-chat-stream", async (event: IpcMainEvent, prompt: string) => {
       },
       body: JSON.stringify({
         prompt: prompt,
+        user_id: userId,
+        session_id: sessionId,
       }),
     });
 
