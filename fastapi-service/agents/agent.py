@@ -144,12 +144,14 @@ def agent_node(state: AgentState) -> AgentState:
     # 如果沒有系統消息，添加系統提示詞
     has_system_message = any(isinstance(msg, SystemMessage) for msg in messages)
     if not has_system_message:
-        system_prompt = PromptTemplates.TOOL_AGENT_SYSTEM
+        system_prompt = PromptTemplates.TOOL_AGENT_SYSTEM.format(
+            allowed_topics=PromptTemplates.ALLOWED_TOPICS
+        )
         
         # 如果有記憶上下文，添加到系統提示詞中
         memory_context = state.get("memory_context")
         if memory_context:
-            system_prompt += f"\n\n用戶歷史記憶和偏好：\n{memory_context}"
+            system_prompt += f"\n\n===== 以下是關於用戶的歷史資料 =====\n{memory_context}\n===== 用戶資料結束 ====="
         
         messages = [SystemMessage(content=system_prompt)] + messages
     
@@ -265,12 +267,13 @@ def chat_node(state: AgentState) -> AgentState:
     
     # 如果沒有系統消息，添加系統提示詞（只在第一次會話時）
     if not has_system_message:
-        system_content = "你是一位友善、專業的AI助手。"
-        
-        # 如果有記憶上下文，添加到系統提示詞中（只在第一次會話時）
+        system_content = PromptTemplates.CHAT_SYSTEM.format(
+            allowed_topics=PromptTemplates.ALLOWED_TOPICS
+        )
+
         memory_context = state.get("memory_context")
         if memory_context:
-            system_content += f"\n\n用戶歷史記憶和偏好：\n{memory_context}"
+            system_content += f"\n\n===== 以下是關於用戶的歷史資料 =====\n{memory_context}\n===== 用戶資料結束 ====="
         
         # 創建系統消息並添加到返回列表（這樣會被 checkpointer 保存）
         system_msg = SystemMessage(content=system_content)
