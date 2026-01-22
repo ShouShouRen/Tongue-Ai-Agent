@@ -73,58 +73,14 @@ class LongTermMemory:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             
-            # 用戶記憶表：存儲用戶的基本信息和偏好
+            # 用戶記憶表：存儲用戶的基本信息（作為外鍵引用）
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS user_memory (
                     user_id VARCHAR(255) PRIMARY KEY,
-                    preferences TEXT,  -- JSON 格式的用戶偏好
+                    preferences TEXT,  -- JSON 格式的用戶偏好（保留以備將來使用）
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
-            """)
-            
-            # 會話記憶表：存儲每個會話的摘要和關鍵信息
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS session_memory (
-                    session_id VARCHAR(255) PRIMARY KEY,
-                    user_id VARCHAR(255),
-                    summary TEXT,  -- 會話摘要
-                    key_points TEXT,  -- JSON 格式的關鍵點
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (user_id) REFERENCES user_memory(user_id) ON DELETE CASCADE
-                )
-            """)
-            
-            # 長期記憶表：存儲重要的記憶片段（事實、偏好、歷史等）
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS long_term_memories (
-                    id SERIAL PRIMARY KEY,
-                    user_id VARCHAR(255),
-                    memory_type VARCHAR(50),  -- 'fact', 'preference', 'history', 'medical_record'
-                    content TEXT,  -- 記憶內容
-                    metadata TEXT,  -- JSON 格式的元數據
-                    importance_score REAL DEFAULT 1.0,  -- 重要性評分（1-10）
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (user_id) REFERENCES user_memory(user_id) ON DELETE CASCADE
-                )
-            """)
-            
-            # 創建索引以提高查詢效率
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_user_id ON long_term_memories(user_id)
-            """)
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_memory_type ON long_term_memories(memory_type)
-            """)
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_session_user ON session_memory(user_id)
-            """)
-            
-            # 創建重要性評分索引以優化查詢
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_importance_score ON long_term_memories(importance_score DESC)
             """)
             
             # 舌診分析記錄表：存儲每次舌診分析的完整結果（用於製作圖表）
@@ -176,49 +132,20 @@ class LongTermMemory:
             return None
     
     def save_session_summary(self, session_id: str, user_id: str, summary: str, key_points: List[str] = None):
-        """保存會話摘要"""
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            
-            key_points_json = json.dumps(key_points or [], ensure_ascii=False)
-            
-            # 確保用戶存在（如果不存在則創建）
-            cursor.execute("""
-                INSERT INTO user_memory (user_id, updated_at)
-                VALUES (%s, %s)
-                ON CONFLICT (user_id) DO NOTHING
-            """, (user_id, datetime.now()))
-            
-            cursor.execute("""
-                INSERT INTO session_memory (session_id, user_id, summary, key_points, updated_at)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (session_id) 
-                DO UPDATE SET 
-                    summary = EXCLUDED.summary, 
-                    key_points = EXCLUDED.key_points, 
-                    updated_at = EXCLUDED.updated_at
-            """, (session_id, user_id, summary, key_points_json, datetime.now()))
+        """
+        保存會話摘要（已棄用，表已移除）
+        保留此方法以保持向後兼容性，但不會實際保存數據
+        """
+        # 表已移除，此方法不再執行任何操作
+        pass
     
     def get_session_summary(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """獲取會話摘要"""
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            
-            cursor.execute("""
-                SELECT user_id, summary, key_points, created_at, updated_at
-                FROM session_memory WHERE session_id = %s
-            """, (session_id,))
-            row = cursor.fetchone()
-            
-            if row:
-                return {
-                    "user_id": row[0],
-                    "summary": row[1],
-                    "key_points": json.loads(row[2]) if row[2] else [],
-                    "created_at": row[3].isoformat() if row[3] else None,
-                    "updated_at": row[4].isoformat() if row[4] else None
-                }
-            return None
+        """
+        獲取會話摘要（已棄用，表已移除）
+        保留此方法以保持向後兼容性，但返回 None
+        """
+        # 表已移除，返回 None
+        return None
     
     def save_memory(
         self,
@@ -229,32 +156,11 @@ class LongTermMemory:
         importance_score: float = 1.0
     ):
         """
-        保存長期記憶
-        
-        Args:
-            user_id: 用戶 ID
-            memory_type: 記憶類型（'fact', 'preference', 'history', 'medical_record'）
-            content: 記憶內容
-            metadata: 元數據（可選）
-            importance_score: 重要性評分（1-10）
+        保存長期記憶（已棄用，表已移除）
+        保留此方法以保持向後兼容性，但不會實際保存數據
         """
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            
-            metadata_json = json.dumps(metadata or {}, ensure_ascii=False)
-            
-            # 確保用戶存在（如果不存在則創建）
-            cursor.execute("""
-                INSERT INTO user_memory (user_id, updated_at)
-                VALUES (%s, %s)
-                ON CONFLICT (user_id) DO NOTHING
-            """, (user_id, datetime.now()))
-            
-            cursor.execute("""
-                INSERT INTO long_term_memories 
-                (user_id, memory_type, content, metadata, importance_score, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s)
-            """, (user_id, memory_type, content, metadata_json, importance_score, datetime.now()))
+        # 表已移除，此方法不再執行任何操作
+        pass
     
     def search_memories(
         self,
@@ -265,97 +171,22 @@ class LongTermMemory:
         min_importance: float = 0.0
     ) -> List[Dict[str, Any]]:
         """
-        搜索長期記憶
-        
-        Args:
-            user_id: 用戶 ID
-            query: 搜索關鍵詞（簡單的文本匹配）
-            memory_type: 記憶類型過濾
-            limit: 返回結果數量限制
-            min_importance: 最小重要性評分
-        
-        Returns:
-            記憶列表，按重要性評分和時間排序
+        搜索長期記憶（已棄用，表已移除）
+        保留此方法以保持向後兼容性，但返回空列表
         """
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            
-            # 構建查詢
-            conditions = ["user_id = %s", "importance_score >= %s"]
-            params = [user_id, min_importance]
-            
-            if memory_type:
-                conditions.append("memory_type = %s")
-                params.append(memory_type)
-            
-            if query:
-                conditions.append("(content LIKE %s OR metadata LIKE %s)")
-                query_pattern = f"%{query}%"
-                params.extend([query_pattern, query_pattern])
-            
-            where_clause = " AND ".join(conditions)
-            
-            cursor.execute(f"""
-                SELECT id, memory_type, content, metadata, importance_score, created_at, updated_at
-                FROM long_term_memories
-                WHERE {where_clause}
-                ORDER BY importance_score DESC, updated_at DESC
-                LIMIT %s
-            """, params + [limit])
-            
-            rows = cursor.fetchall()
-            
-            memories = []
-            for row in rows:
-                memories.append({
-                    "id": row[0],
-                    "memory_type": row[1],
-                    "content": row[2],
-                    "metadata": json.loads(row[3]) if row[3] else {},
-                    "importance_score": float(row[4]) if row[4] else 0.0,
-                    "created_at": row[5].isoformat() if row[5] else None,
-                    "updated_at": row[6].isoformat() if row[6] else None
-                })
-            
-            return memories
+        # 表已移除，返回空列表
+        return []
     
     def get_user_memories_summary(self, user_id: str) -> Dict[str, Any]:
         """獲取用戶記憶摘要（用於構建上下文）"""
         # 獲取用戶偏好
         preferences = self.get_user_preference(user_id)
         
-        # 獲取重要的長期記憶
-        important_memories = self.search_memories(
-            user_id=user_id,
-            limit=5,
-            min_importance=5.0
-        )
-        
-        # 獲取最近的會話摘要
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT session_id, summary, key_points, updated_at
-                FROM session_memory
-                WHERE user_id = %s
-                ORDER BY updated_at DESC
-                LIMIT 3
-            """, (user_id,))
-            recent_sessions = cursor.fetchall()
-        
-        sessions = []
-        for row in recent_sessions:
-            sessions.append({
-                "session_id": row[0],
-                "summary": row[1],
-                "key_points": json.loads(row[2]) if row[2] else [],
-                "updated_at": row[3].isoformat() if row[3] else None
-            })
-        
+        # 簡化版本：只返回偏好（其他表已移除）
         return {
             "preferences": preferences,
-            "important_memories": important_memories,
-            "recent_sessions": sessions
+            "important_memories": [],
+            "recent_sessions": []
         }
     
     def save_tongue_analysis(
@@ -542,26 +373,10 @@ class MemoryManager:
         
         context_parts = []
         
-        # 用戶偏好
+        # 用戶偏好（如果有的話）
         if summary["preferences"]:
             prefs = json.dumps(summary["preferences"], ensure_ascii=False, indent=2)
             context_parts.append(f"用戶偏好：\n{prefs}")
-        
-        # 重要記憶
-        if summary["important_memories"]:
-            memories_text = "\n".join([
-                f"- [{m['memory_type']}] {m['content']}" 
-                for m in summary["important_memories"]
-            ])
-            context_parts.append(f"重要記憶：\n{memories_text}")
-        
-        # 最近的會話摘要
-        if summary["recent_sessions"]:
-            sessions_text = "\n".join([
-                f"- {s['summary']}" 
-                for s in summary["recent_sessions"]
-            ])
-            context_parts.append(f"最近的會話摘要：\n{sessions_text}")
         
         if context_parts:
             return "\n\n".join(context_parts)
