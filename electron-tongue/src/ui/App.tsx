@@ -9,7 +9,9 @@ import {
 import { makeStreamRequest, predictAndAnalyzeTongueImage } from "../api/api";
 import ChatMessage from "./components/chat-message/chat-message";
 import CameraModal from "./components/camera-modal/camera-modal";
+import WeeklyReportModal from "./components/weekly-report-modal";
 import mitLogo from "/logo.png";
+import { BarChart3 } from "lucide-react";
 
 interface ChatEntry {
   user: "assistant" | "user";
@@ -24,9 +26,10 @@ const App = () => {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [isCameraOpen, setIsCameraOpen] = useState<boolean>(false);
+  const [isWeeklyReportOpen, setIsWeeklyReportOpen] = useState<boolean>(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  
+
   // 記憶管理：生成並保存 user_id 和 session_id
   const [userId] = useState<string>(() => {
     // 從 localStorage 獲取或生成新的 user_id
@@ -37,7 +40,7 @@ const App = () => {
     }
     return storedUserId;
   });
-  
+
   const [sessionId] = useState<string>(() => {
     // 每次應用啟動時生成新的 session_id（會話記憶）
     return `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -182,7 +185,7 @@ const App = () => {
         const prompt = userMessage;
 
         const cleanup = await makeStreamRequest(
-          { 
+          {
             prompt,
             user_id: userId,
             session_id: sessionId,
@@ -253,19 +256,25 @@ const App = () => {
 
   return (
     <div className="flex flex-col h-screen w-screen bg-white text-gray-800 overflow-hidden font-sans">
-      <header className="h-[70px] bg-white border-b border-gray-200 flex items-center px-6 md:px-6 shrink-0 shadow-sm">
-        <div className="w-full max-w-[1200px] mx-auto flex items-center">
-          <div className="flex items-center">
-            <div className="flex items-baseline gap-1 font-semibold tracking-tight">
-              <img
-                src={mitLogo}
-                alt="MIT Logo"
-                width={200}
-                className="h-[70px]"
-              />
-            </div>
+      <header className="h-[70px] bg-white border-b border-gray-200 flex items-center px-6 md:px-6 shrink-0 shadow-sm justify-between">
+        <div className="flex items-center">
+          <div className="flex items-baseline gap-1 font-semibold tracking-tight">
+            <img
+              src={mitLogo}
+              alt="MIT Logo"
+              width={200}
+              className="h-[70px]"
+            />
           </div>
         </div>
+        <button
+          onClick={() => setIsWeeklyReportOpen(true)}
+          className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 hover:text-mit-red transition-all shadow-sm group"
+          title="查看健康週報"
+        >
+          <BarChart3 size={18} className="group-hover:scale-110 transition-transform" />
+          <span className="text-sm font-medium">健康週報</span>
+        </button>
       </header>
 
       <main className="flex-1 flex flex-col overflow-hidden bg-gray-50">
@@ -377,6 +386,12 @@ const App = () => {
         isOpen={isCameraOpen}
         onClose={() => setIsCameraOpen(false)}
         onCapture={handleCameraCapture}
+      />
+
+      <WeeklyReportModal
+        isOpen={isWeeklyReportOpen}
+        onClose={() => setIsWeeklyReportOpen(false)}
+        userId={userId}
       />
     </div>
   );
