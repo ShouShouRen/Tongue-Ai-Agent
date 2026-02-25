@@ -3,10 +3,17 @@ import {
   useState,
   type FormEvent,
   type ChangeEvent,
+  type Dispatch,
+  type SetStateAction,
   useRef,
   useEffect,
+  useCallback,
 } from "react";
-import { makeStreamRequest, predictAndAnalyzeTongueImage } from "../api/api";
+import {
+  makeStreamRequest,
+  predictAndAnalyzeTongueImage,
+  transcribeAudio,
+} from "../api/api";
 import ChatMessage from "./components/chat-message/chat-message";
 import CameraModal from "./components/camera-modal/camera-modal";
 import WeeklyReportModal from "./components/weekly-report-modal";
@@ -20,6 +27,38 @@ interface ChatEntry {
   toolStatus?: string;
 }
 
+/** 移除重複的句子（多段辨識常會回傳相同內容，可能交錯出現） */
+function dedupeRepeatedSentences(text: string): string {
+  const parts = text
+    .split(/[。.]+/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const p of parts) {
+    if (!seen.has(p)) {
+      seen.add(p);
+      result.push(p);
+    }
+  }
+  return result.length ? result.join("。") + "。" : "";
+}
+
+/** 更新聊天記錄中最後一則助理訊息的欄位 */
+function updateLastAssistantMessage(
+  setChatLog: Dispatch<SetStateAction<ChatEntry[]>>,
+  update: Partial<Pick<ChatEntry, "message" | "toolStatus">>,
+): void {
+  setChatLog((prev) => {
+    const newLog = [...prev];
+    const lastIndex = newLog.length - 1;
+    if (lastIndex >= 0 && newLog[lastIndex].user === "assistant") {
+      newLog[lastIndex] = { ...newLog[lastIndex], ...update };
+    }
+    return newLog;
+  });
+}
+
 const App = () => {
   const [input, setInput] = useState<string>("");
   const [chatLog, setChatLog] = useState<ChatEntry[]>([]);
@@ -27,8 +66,18 @@ const App = () => {
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [isCameraOpen, setIsCameraOpen] = useState<boolean>(false);
   const [isWeeklyReportOpen, setIsWeeklyReportOpen] = useState<boolean>(false);
+  const [isRecording, setIsRecording] = useState<boolean>(false);
+  const [isTranscribing, setIsTranscribing] = useState<boolean>(false);
+  const [liveTranscript, setLiveTranscript] = useState<string>("");
   const chatEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const chunkQueueRef = useRef<Blob[]>([]);
+  const isProcessingChunkRef = useRef<boolean>(false);
+  const mimeTypeRef = useRef<string>("");
+  const shouldContinueRecordingRef = useRef<boolean>(false);
+  const recordingTimerRef = useRef<number | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
 
   // 記憶管理：生成並保存 user_id 和 session_id
   const [userId] = useState<string>(() => {
@@ -49,6 +98,116 @@ const App = () => {
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [chatLog]);
+
+  // 逐一處理 chunk 佇列，避免同時送出多個請求
+  const processChunkQueue = useCallback(async () => {
+    if (isProcessingChunkRef.current) return;
+    isProcessingChunkRef.current = true;
+    while (chunkQueueRef.current.length > 0) {
+      const chunk = chunkQueueRef.current.shift()!;
+      try {
+        const text = await transcribeAudio(chunk);
+        if (text) {
+          setLiveTranscript((prev) => dedupeRepeatedSentences(prev + text));
+        }
+      } catch {
+        // chunk 辨識失敗靜默忽略，繼續下一個
+      }
+    }
+    isProcessingChunkRef.current = false;
+  }, []);
+
+  const toggleRecording = useCallback(async () => {
+    if (isRecording) {
+      // 停止錄音
+      setIsRecording(false);
+      shouldContinueRecordingRef.current = false;
+      if (recordingTimerRef.current) {
+        clearTimeout(recordingTimerRef.current);
+        recordingTimerRef.current = null;
+      }
+      mediaRecorderRef.current?.stop();
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : MediaRecorder.isTypeSupported("audio/webm")
+          ? "audio/webm"
+          : "";
+      mimeTypeRef.current = mimeType;
+      chunkQueueRef.current = [];
+      isProcessingChunkRef.current = false;
+      setLiveTranscript("");
+      shouldContinueRecordingRef.current = true;
+
+      // 停止-重啟模式：每2.5秒重啟錄音，確保每個chunk都有完整的WebM頭
+      const startRecorder = () => {
+        if (!shouldContinueRecordingRef.current || !streamRef.current) return;
+
+        const recorder = new MediaRecorder(
+          streamRef.current,
+          mimeType ? { mimeType } : undefined,
+        );
+        mediaRecorderRef.current = recorder;
+
+        recorder.ondataavailable = (e) => {
+          if (e.data.size > 0) {
+            const chunkBlob = new Blob([e.data], {
+              type: mimeType || "audio/webm",
+            });
+            chunkQueueRef.current.push(chunkBlob);
+            processChunkQueue();
+          }
+        };
+
+        recorder.onstop = async () => {
+          // 如果應該繼續錄音，立即重啟
+          if (shouldContinueRecordingRef.current) {
+            setTimeout(startRecorder, 0);
+          } else {
+            // 真正停止錄音
+            streamRef.current?.getTracks().forEach((t) => t.stop());
+            streamRef.current = null;
+            setIsTranscribing(true);
+            const maxWaitMs = 45000; // 最多等 45 秒，避免後端載入 Whisper 時卡住
+            const start = Date.now();
+            while (
+              (isProcessingChunkRef.current ||
+                chunkQueueRef.current.length > 0) &&
+              Date.now() - start < maxWaitMs
+            ) {
+              await new Promise((r) => setTimeout(r, 100));
+            }
+            setIsTranscribing(false);
+            setLiveTranscript((live) => {
+              if (live) {
+                const deduped = dedupeRepeatedSentences(live);
+                setInput((prev) => (prev ? prev + deduped : deduped));
+              }
+              return "";
+            });
+          }
+        };
+
+        recorder.start();
+        // 2.5秒後停止，觸發onstop自動重啟
+        recordingTimerRef.current = setTimeout(() => {
+          if (recorder.state === "recording") {
+            recorder.stop();
+          }
+        }, 2500);
+      };
+
+      startRecorder();
+      setIsRecording(true);
+    } catch {
+      alert("無法存取麥克風，請允許麥克風權限。");
+    }
+  }, [isRecording, processChunkQueue]);
 
   const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -124,60 +283,24 @@ const App = () => {
           },
           (chunk: string) => {
             accumulatedText += chunk;
-            setChatLog((prev) => {
-              const newLog = [...prev];
-              const lastIndex = newLog.length - 1;
-              if (lastIndex >= 0 && newLog[lastIndex].user === "assistant") {
-                newLog[lastIndex] = {
-                  ...newLog[lastIndex],
-                  message: accumulatedText,
-                };
-              }
-              return newLog;
+            updateLastAssistantMessage(setChatLog, {
+              message: accumulatedText,
             });
           },
           (status: string) => {
-            setChatLog((prev) => {
-              const newLog = [...prev];
-              const lastIndex = newLog.length - 1;
-              if (lastIndex >= 0 && newLog[lastIndex].user === "assistant") {
-                newLog[lastIndex] = {
-                  ...newLog[lastIndex],
-                  toolStatus: status,
-                };
-              }
-              return newLog;
-            });
+            updateLastAssistantMessage(setChatLog, { toolStatus: status });
           },
           () => {
             setIsLoading(false);
-            setChatLog((prev) => {
-              const newLog = [...prev];
-              const lastIndex = newLog.length - 1;
-              if (lastIndex >= 0 && newLog[lastIndex].user === "assistant") {
-                newLog[lastIndex] = {
-                  ...newLog[lastIndex],
-                  toolStatus: undefined,
-                };
-              }
-              return newLog;
-            });
+            updateLastAssistantMessage(setChatLog, { toolStatus: undefined });
           },
           (error: string) => {
-            setChatLog((prev) => {
-              const newLog = [...prev];
-              const lastIndex = newLog.length - 1;
-              if (lastIndex >= 0 && newLog[lastIndex].user === "assistant") {
-                newLog[lastIndex] = {
-                  ...newLog[lastIndex],
-                  message: `錯誤：${error}`,
-                  toolStatus: undefined,
-                };
-              }
-              return newLog;
+            updateLastAssistantMessage(setChatLog, {
+              message: `錯誤：${error}`,
+              toolStatus: undefined,
             });
             setIsLoading(false);
-          }
+          },
         );
 
         return cleanup;
@@ -192,63 +315,30 @@ const App = () => {
           },
           (chunk: string) => {
             accumulatedText += chunk;
-            setChatLog((prev) => {
-              const newLog = [...prev];
-              const lastIndex = newLog.length - 1;
-              if (lastIndex >= 0 && newLog[lastIndex].user === "assistant") {
-                newLog[lastIndex] = {
-                  ...newLog[lastIndex],
-                  message: accumulatedText,
-                };
-              }
-              return newLog;
+            updateLastAssistantMessage(setChatLog, {
+              message: accumulatedText,
             });
           },
           () => {
             setIsLoading(false);
-            setChatLog((prev) => {
-              const newLog = [...prev];
-              const lastIndex = newLog.length - 1;
-              if (lastIndex >= 0 && newLog[lastIndex].user === "assistant") {
-                newLog[lastIndex] = {
-                  ...newLog[lastIndex],
-                  toolStatus: undefined,
-                };
-              }
-              return newLog;
-            });
+            updateLastAssistantMessage(setChatLog, { toolStatus: undefined });
           },
           (error: string) => {
-            setChatLog((prev) => {
-              const newLog = [...prev];
-              const lastIndex = newLog.length - 1;
-              if (lastIndex >= 0 && newLog[lastIndex].user === "assistant") {
-                newLog[lastIndex] = {
-                  ...newLog[lastIndex],
-                  message: `錯誤：${error}`,
-                  toolStatus: undefined,
-                };
-              }
-              return newLog;
+            updateLastAssistantMessage(setChatLog, {
+              message: `錯誤：${error}`,
+              toolStatus: undefined,
             });
             setIsLoading(false);
-          }
+          },
         );
 
         return cleanup;
       }
-    } catch (error: any) {
-      setChatLog((prev) => {
-        const newLog = [...prev];
-        const lastIndex = newLog.length - 1;
-        if (lastIndex >= 0 && newLog[lastIndex].user === "assistant") {
-          newLog[lastIndex] = {
-            ...newLog[lastIndex],
-            message: `錯誤：${error.message || "發生未知錯誤"}`,
-            toolStatus: undefined,
-          };
-        }
-        return newLog;
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "發生未知錯誤";
+      updateLastAssistantMessage(setChatLog, {
+        message: `錯誤：${message}`,
+        toolStatus: undefined,
       });
       setIsLoading(false);
     }
@@ -272,7 +362,10 @@ const App = () => {
           className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 hover:text-mit-red transition-all shadow-sm group"
           title="查看健康週報"
         >
-          <BarChart3 size={18} className="group-hover:scale-110 transition-transform" />
+          <BarChart3
+            size={18}
+            className="group-hover:scale-110 transition-transform"
+          />
           <span className="text-sm font-medium">健康週報</span>
         </button>
       </header>
@@ -349,20 +442,89 @@ const App = () => {
                 <circle cx="12" cy="13" r="4" />
               </svg>
             </button>
+            <button
+              type="button"
+              className={`flex items-center justify-center w-11 h-11 border-none rounded-xl cursor-pointer transition-all shrink-0 ${
+                isRecording
+                  ? "bg-red-100 text-red-600 border border-red-300 animate-pulse shadow-[0_0_0_3px_rgba(220,38,38,0.2)]"
+                  : isTranscribing
+                    ? "bg-yellow-50 text-yellow-500 border border-yellow-200"
+                    : "bg-gray-50 text-gray-600 border border-gray-200 hover:bg-gray-100 hover:text-gray-700 hover:border-gray-300 active:bg-gray-200"
+              } disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none`}
+              onClick={toggleRecording}
+              disabled={isLoading || isTranscribing}
+              title={
+                isRecording
+                  ? "停止錄音"
+                  : isTranscribing
+                    ? "辨識中..."
+                    : "語音輸入"
+              }
+              aria-label={isRecording ? "停止錄音" : "語音輸入"}
+            >
+              {isTranscribing ? (
+                <svg
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  className="animate-spin"
+                >
+                  <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
+                  <path d="M12 2a10 10 0 0 1 10 10" />
+                </svg>
+              ) : isRecording ? (
+                <svg
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="currentColor"
+                >
+                  <rect x="6" y="6" width="12" height="12" rx="2" />
+                </svg>
+              ) : (
+                <svg
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                >
+                  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                  <line x1="12" y1="19" x2="12" y2="23" />
+                  <line x1="8" y1="23" x2="16" y2="23" />
+                </svg>
+              )}
+            </button>
             <input
               type="text"
               className="flex-1 py-3 px-4 border border-gray-200 rounded-xl text-sm text-gray-800 bg-white outline-none transition-all shadow-sm placeholder:text-gray-400 focus:border-mit-red focus:shadow-[0_0_0_3px_rgba(214,69,69,0.1)] disabled:bg-gray-50 disabled:cursor-not-allowed"
-              value={input}
-              onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                setInput(e.target.value)
+              value={isRecording ? input + liveTranscript : input}
+              onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                if (!isRecording) setInput(e.target.value);
+              }}
+              disabled={isLoading || isTranscribing}
+              placeholder={
+                isTranscribing
+                  ? "辨識中..."
+                  : isRecording
+                    ? "正在聆聽..."
+                    : isLoading
+                      ? "正在處理..."
+                      : "輸入訊息..."
               }
-              disabled={isLoading}
-              placeholder={isLoading ? "正在處理..." : "輸入訊息..."}
             />
             <button
               type="submit"
               className="flex items-center justify-center w-11 h-11 border-none rounded-xl cursor-pointer transition-all shrink-0 bg-mit-red text-white shadow-[0_2px_4px_rgba(214,69,69,0.2)] hover:bg-mit-red-dark hover:-translate-y-0.5 hover:shadow-[0_4px_8px_rgba(214,69,69,0.3)] active:translate-y-0 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
-              disabled={isLoading || (!input.trim() && !selectedImage)}
+              disabled={
+                isLoading ||
+                (!(input.trim() || liveTranscript) && !selectedImage)
+              }
               title="發送"
               aria-label="發送訊息"
             >

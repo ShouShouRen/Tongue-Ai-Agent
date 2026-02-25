@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, IpcMainEvent } from "electron";
+import http from "http";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -6,6 +7,163 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const FASTAPI_URL = "http://localhost:8000";
+const FASTAPI_BASE = new URL(FASTAPI_URL);
+
+/** 使用 Node http 發送 POST JSON，避免主進程 fetch 造成 405 */
+function fastApiPostJson(
+  path: string,
+  body: Record<string, unknown>,
+): Promise<{ statusCode: number; raw: string }> {
+  const bodyStr = JSON.stringify(body);
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        hostname: FASTAPI_BASE.hostname,
+        port: FASTAPI_BASE.port || 80,
+        path,
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(bodyStr, "utf8"),
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        res.on("end", () =>
+          resolve({
+            statusCode: res.statusCode || 0,
+            raw: Buffer.concat(chunks).toString("utf8"),
+          }),
+        );
+      },
+    );
+    req.on("error", reject);
+    req.write(bodyStr, "utf8");
+    req.end();
+  });
+}
+
+/** 使用 Node http 發送 POST JSON 並處理 SSE 串流，透過 onChunk 回傳 */
+function fastApiPostStream(
+  path: string,
+  body: Record<string, unknown>,
+  onChunk: (data: {
+    type: "chunk" | "done" | "error";
+    content?: string;
+    error?: string;
+  }) => void,
+): Promise<void> {
+  const bodyStr = JSON.stringify(body);
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        hostname: FASTAPI_BASE.hostname,
+        port: FASTAPI_BASE.port || 80,
+        path,
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(bodyStr, "utf8"),
+        },
+      },
+      (res) => {
+        if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 300)) {
+          let raw = "";
+          res.on("data", (chunk: Buffer) => (raw += chunk.toString("utf8")));
+          res.on("end", () => {
+            try {
+              const data = JSON.parse(raw) as { detail?: string };
+              onChunk({
+                type: "error",
+                error:
+                  data.detail || `API 請求失敗 (狀態碼: ${res.statusCode})`,
+              });
+            } catch {
+              onChunk({
+                type: "error",
+                error: raw || `API 請求失敗 (狀態碼: ${res.statusCode})`,
+              });
+            }
+            resolve();
+          });
+          return;
+        }
+        let buffer = "";
+        let done = false;
+        const processLine = (line: string): boolean => {
+          if (line.startsWith("data: ")) {
+            const data = line.slice(6);
+            if (data === "[DONE]") {
+              onChunk({ type: "done" });
+              done = true;
+              return true;
+            }
+            try {
+              const json = JSON.parse(data) as {
+                content?: string;
+                chunk?: string;
+                response?: string;
+              };
+              const content = json.content ?? json.chunk ?? json.response ?? "";
+              if (content) onChunk({ type: "chunk", content });
+            } catch {
+              if (data.trim()) onChunk({ type: "chunk", content: data });
+            }
+          } else if (line.trim()) {
+            try {
+              const json = JSON.parse(line) as {
+                content?: string;
+                chunk?: string;
+                response?: string;
+              };
+              const content = json.content ?? json.chunk ?? json.response ?? "";
+              if (content) onChunk({ type: "chunk", content });
+            } catch {
+              if (line.trim()) onChunk({ type: "chunk", content: line });
+            }
+          }
+          return false;
+        };
+        res.on("data", (chunk: Buffer) => {
+          if (done) return;
+          buffer += chunk.toString("utf8");
+          const lines = buffer.split("\n");
+          buffer = lines.pop() ?? "";
+          for (const line of lines) {
+            if (processLine(line)) return;
+          }
+        });
+        res.on("end", () => {
+          if (done) {
+            resolve();
+            return;
+          }
+          if (buffer.trim()) processLine(buffer);
+          onChunk({ type: "done" });
+          resolve();
+        });
+      },
+    );
+    req.on("error", (err) => {
+      onChunk({ type: "error", error: err.message });
+      resolve();
+    });
+    req.write(bodyStr, "utf8");
+    req.end();
+  });
+}
+
+function toIpcErrorMessage(error: unknown, baseUrl: string): string {
+  if (!(error instanceof Error)) return "發生未知錯誤";
+  if (
+    error.message.includes("fetch failed") ||
+    error.message.includes("ECONNREFUSED")
+  ) {
+    return `無法連接到 FastAPI 服務 (${baseUrl})，請確保服務正在運行`;
+  }
+  return error.message;
+}
 
 app.on("ready", () => {
   const mainWindow = new BrowserWindow({
@@ -34,7 +192,7 @@ app.on("ready", () => {
       }
       console.log(`拒絕權限請求: ${permission}`);
       callback(false);
-    }
+    },
   );
 
   mainWindow.webContents.session.webRequest.onBeforeRequest(
@@ -48,7 +206,7 @@ app.on("ready", () => {
         return;
       }
       callback({});
-    }
+    },
   );
 
   mainWindow.webContents.session.webRequest.onHeadersReceived(
@@ -61,7 +219,7 @@ app.on("ready", () => {
           ],
         },
       });
-    }
+    },
   );
 
   const isDev = !app.isPackaged;
@@ -80,193 +238,183 @@ app.on("ready", () => {
     });
   } else {
     mainWindow.loadFile(
-      path.join(app.getAppPath(), "dist-react", "index.html")
+      path.join(app.getAppPath(), "dist-react", "index.html"),
     );
   }
 });
 
-ipcMain.handle("rag-chat", async (_event, prompt: string) => {
-  try {
-    if (!prompt || prompt.trim().length === 0) {
-      throw new Error("提示內容不能為空");
-    }
-
-    const response = await fetch(`${FASTAPI_URL}/chat`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        prompt: prompt,
-      }),
-    });
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(
-        errorData.detail || `API 請求失敗 (狀態碼: ${response.status})`
-      );
-    }
-
-    const data = await response.json();
-    return {
-      success: true,
-      data: data.response || data.answer || "沒有收到回應",
-    };
-  } catch (error: any) {
-    console.error("FastAPI 服務錯誤:", {
-      message: error.message,
-      url: FASTAPI_URL,
-    });
-
-    let errorMessage = "發生未知錯誤";
-
-    if (error.message) {
-      if (
-        error.message.includes("fetch failed") ||
-        error.message.includes("ECONNREFUSED")
-      ) {
-        errorMessage = `無法連接到 FastAPI 服務 (${FASTAPI_URL})，請確保服務正在運行`;
-      } else {
-        errorMessage = error.message;
+ipcMain.handle(
+  "rag-chat",
+  async (_event, prompt: string, userId?: string, sessionId?: string) => {
+    try {
+      if (!prompt || prompt.trim().length === 0) {
+        throw new Error("提示內容不能為空");
       }
-    }
 
-    return {
-      success: false,
-      error: errorMessage,
-    };
-  }
-});
-
-ipcMain.on("rag-chat-stream", async (event: IpcMainEvent, prompt: string, userId?: string, sessionId?: string) => {
-  try {
-    if (!prompt || prompt.trim().length === 0) {
-      event.sender.send("rag-chat-stream-chunk", {
-        type: "error",
-        error: "提示內容不能為空",
-      });
-      return;
-    }
-
-    const response = await fetch(`${FASTAPI_URL}/chat/stream`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        prompt: prompt,
+      const { statusCode, raw } = await fastApiPostJson("/chat", {
+        prompt: prompt.trim(),
         user_id: userId,
         session_id: sessionId,
-      }),
-    });
+      });
 
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      const errorMessage =
-        errorData.detail || `API 請求失敗 (狀態碼: ${response.status})`;
+      if (statusCode < 200 || statusCode >= 300) {
+        const errorData = (() => {
+          try {
+            return JSON.parse(raw) as { detail?: string };
+          } catch {
+            return {};
+          }
+        })();
+        throw new Error(
+          errorData.detail || `API 請求失敗 (狀態碼: ${statusCode})`,
+        );
+      }
+
+      const data = (() => {
+        try {
+          return JSON.parse(raw) as { response?: string; answer?: string };
+        } catch {
+          return {};
+        }
+      })();
+      return {
+        success: true,
+        data: data.response || data.answer || "沒有收到回應",
+      };
+    } catch (error: unknown) {
+      const errorMessage = toIpcErrorMessage(error, FASTAPI_URL);
+      console.error("FastAPI 服務錯誤:", {
+        message: errorMessage,
+        url: FASTAPI_URL,
+      });
+      return {
+        success: false,
+        error: errorMessage,
+      };
+    }
+  },
+);
+
+ipcMain.on(
+  "rag-chat-stream",
+  async (
+    event: IpcMainEvent,
+    prompt: string,
+    userId?: string,
+    sessionId?: string,
+  ) => {
+    try {
+      if (!prompt || prompt.trim().length === 0) {
+        event.sender.send("rag-chat-stream-chunk", {
+          type: "error",
+          error: "提示內容不能為空",
+        });
+        return;
+      }
+
+      const send = (payload: {
+        type: "chunk" | "done" | "error";
+        content?: string;
+        error?: string;
+      }) => event.sender.send("rag-chat-stream-chunk", payload);
+
+      await fastApiPostStream(
+        "/chat/stream",
+        { prompt, user_id: userId, session_id: sessionId },
+        (data) => {
+          if (data.type === "chunk" && data.content)
+            send({ type: "chunk", content: data.content });
+          else if (data.type === "done") send({ type: "done" });
+          else if (data.type === "error" && data.error)
+            send({ type: "error", error: data.error });
+        },
+      );
+    } catch (error: unknown) {
+      const errorMessage = toIpcErrorMessage(error, FASTAPI_URL);
+      console.error("FastAPI 流式服務錯誤:", errorMessage);
       event.sender.send("rag-chat-stream-chunk", {
         type: "error",
         error: errorMessage,
       });
-      return;
     }
+  },
+);
 
-    const reader = response.body?.getReader();
-    const decoder = new TextDecoder();
+ipcMain.handle("transcribe-audio", async (_event, audioData: Uint8Array) => {
+  try {
+    const buffer = Buffer.from(audioData);
+    const boundary = `----ElectronFormBoundary${Date.now().toString(36)}`;
+    const preamble = Buffer.from(
+      `--${boundary}\r\n` +
+        `Content-Disposition: form-data; name="file"; filename="audio.webm"\r\n` +
+        `Content-Type: audio/webm\r\n\r\n`,
+      "utf8",
+    );
+    const epilogue = Buffer.from(`\r\n--${boundary}--\r\n`, "utf8");
+    const body = Buffer.concat([preamble, buffer, epilogue]);
 
-    if (!reader) {
-      event.sender.send("rag-chat-stream-chunk", {
-        type: "error",
-        error: "無法讀取響應流",
+    const result = await new Promise<{
+      success: boolean;
+      text?: string;
+      error?: string;
+    }>((resolve) => {
+      const req = http.request(
+        {
+          hostname: FASTAPI_BASE.hostname,
+          port: FASTAPI_BASE.port || 80,
+          path: "/transcribe",
+          method: "POST",
+          headers: {
+            "Content-Type": `multipart/form-data; boundary=${boundary}`,
+            "Content-Length": body.length,
+          },
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          res.on("end", () => {
+            const raw = Buffer.concat(chunks).toString("utf8");
+            try {
+              const data = JSON.parse(raw) as {
+                text?: string;
+                detail?: string;
+              };
+              if (
+                res.statusCode &&
+                res.statusCode >= 200 &&
+                res.statusCode < 300
+              ) {
+                resolve({ success: true, text: data.text ?? "" });
+              } else {
+                resolve({
+                  success: false,
+                  error: data.detail || `語音轉文字失敗 (${res.statusCode})`,
+                });
+              }
+            } catch {
+              resolve({
+                success: false,
+                error: raw || `語音轉文字失敗 (${res.statusCode})`,
+              });
+            }
+          });
+        },
+      );
+      req.on("error", (err) => {
+        resolve({ success: false, error: err.message });
       });
-      return;
-    }
-
-    let buffer = "";
-
-    while (true) {
-      const { done, value } = await reader.read();
-
-      if (done) {
-        event.sender.send("rag-chat-stream-chunk", {
-          type: "done",
-        });
-        break;
-      }
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-
-      for (const line of lines) {
-        if (line.startsWith("data: ")) {
-          const data = line.slice(6);
-          if (data === "[DONE]") {
-            event.sender.send("rag-chat-stream-chunk", {
-              type: "done",
-            });
-            return;
-          }
-
-          try {
-            const json = JSON.parse(data);
-            const content = json.content || json.chunk || json.response || "";
-            if (content) {
-              event.sender.send("rag-chat-stream-chunk", {
-                type: "chunk",
-                content: content,
-              });
-            }
-          } catch (e) {
-            if (data.trim()) {
-              event.sender.send("rag-chat-stream-chunk", {
-                type: "chunk",
-                content: data,
-              });
-            }
-          }
-        } else if (line.trim()) {
-          try {
-            const json = JSON.parse(line);
-            const content = json.content || json.chunk || json.response || "";
-            if (content) {
-              event.sender.send("rag-chat-stream-chunk", {
-                type: "chunk",
-                content: content,
-              });
-            }
-          } catch (e) {
-            if (line.trim()) {
-              event.sender.send("rag-chat-stream-chunk", {
-                type: "chunk",
-                content: line,
-              });
-            }
-          }
-        }
-      }
-    }
-  } catch (error: any) {
-    console.error("FastAPI 流式服務錯誤:", error);
-
-    let errorMessage = "發生未知錯誤";
-
-    if (error.message) {
-      if (
-        error.message.includes("fetch failed") ||
-        error.message.includes("ECONNREFUSED")
-      ) {
-        errorMessage = `無法連接到 FastAPI 服務 (${FASTAPI_URL})，請確保服務正在運行`;
-      } else {
-        errorMessage = error.message;
-      }
-    }
-
-    event.sender.send("rag-chat-stream-chunk", {
-      type: "error",
-      error: errorMessage,
+      req.write(body);
+      req.end();
     });
+
+    if (!result.success) {
+      throw new Error(result.error);
+    }
+    return { success: true, text: result.text ?? "" };
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : "發生未知錯誤";
+    console.error("語音辨識 IPC 錯誤:", msg);
+    return { success: false, error: msg };
   }
 });
 
@@ -275,61 +423,54 @@ ipcMain.handle(
   async (
     _event,
     predictionResults: Record<string, any>,
-    additionalInfo?: string
+    additionalInfo?: string,
   ) => {
     try {
       if (!predictionResults || Object.keys(predictionResults).length === 0) {
         throw new Error("預測結果不能為空");
       }
 
-      const response = await fetch(`${FASTAPI_URL}/tongue/analyze`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          prediction_results: predictionResults,
-          additional_info: additionalInfo || null,
-        }),
+      const { statusCode, raw } = await fastApiPostJson("/tongue/analyze", {
+        prediction_results: predictionResults,
+        additional_info: additionalInfo ?? null,
       });
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
+      if (statusCode < 200 || statusCode >= 300) {
+        const errorData = (() => {
+          try {
+            return JSON.parse(raw) as { detail?: string };
+          } catch {
+            return {};
+          }
+        })();
         throw new Error(
-          errorData.detail || `API 請求失敗 (狀態碼: ${response.status})`
+          errorData.detail || `API 請求失敗 (狀態碼: ${statusCode})`,
         );
       }
 
-      const data = await response.json();
+      const data = (() => {
+        try {
+          return JSON.parse(raw) as { response?: string };
+        } catch {
+          return {};
+        }
+      })();
       return {
         success: true,
         data: data.response || "沒有收到回應",
       };
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const errorMessage = toIpcErrorMessage(error, FASTAPI_URL);
       console.error("舌診分析服務錯誤:", {
-        message: error.message,
+        message: errorMessage,
         url: FASTAPI_URL,
       });
-
-      let errorMessage = "發生未知錯誤";
-
-      if (error.message) {
-        if (
-          error.message.includes("fetch failed") ||
-          error.message.includes("ECONNREFUSED")
-        ) {
-          errorMessage = `無法連接到 FastAPI 服務 (${FASTAPI_URL})，請確保服務正在運行`;
-        } else {
-          errorMessage = error.message;
-        }
-      }
-
       return {
         success: false,
         error: errorMessage,
       };
     }
-  }
+  },
 );
 
 ipcMain.on(
@@ -337,7 +478,7 @@ ipcMain.on(
   async (
     event: IpcMainEvent,
     predictionResults: Record<string, any>,
-    additionalInfo?: string
+    additionalInfo?: string,
   ) => {
     try {
       if (!predictionResults || Object.keys(predictionResults).length === 0) {
@@ -348,123 +489,33 @@ ipcMain.on(
         return;
       }
 
-      const response = await fetch(`${FASTAPI_URL}/tongue/analyze/stream`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
+      const send = (payload: {
+        type: "chunk" | "done" | "error";
+        content?: string;
+        error?: string;
+      }) => event.sender.send("tongue-analyze-stream-chunk", payload);
+
+      await fastApiPostStream(
+        "/tongue/analyze/stream",
+        {
           prediction_results: predictionResults,
-          additional_info: additionalInfo || null,
-        }),
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        const errorMessage =
-          errorData.detail || `API 請求失敗 (狀態碼: ${response.status})`;
-        event.sender.send("tongue-analyze-stream-chunk", {
-          type: "error",
-          error: errorMessage,
-        });
-        return;
-      }
-
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
-
-      if (!reader) {
-        event.sender.send("tongue-analyze-stream-chunk", {
-          type: "error",
-          error: "無法讀取響應流",
-        });
-        return;
-      }
-
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-
-        if (done) {
-          event.sender.send("tongue-analyze-stream-chunk", {
-            type: "done",
-          });
-          break;
-        }
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (line.startsWith("data: ")) {
-            const data = line.slice(6);
-            if (data === "[DONE]") {
-              event.sender.send("tongue-analyze-stream-chunk", {
-                type: "done",
-              });
-              return;
-            }
-
-            try {
-              const json = JSON.parse(data);
-              const content = json.content || json.chunk || json.response || "";
-              if (content) {
-                event.sender.send("tongue-analyze-stream-chunk", {
-                  type: "chunk",
-                  content: content,
-                });
-              }
-            } catch (e) {
-              if (data.trim()) {
-                event.sender.send("tongue-analyze-stream-chunk", {
-                  type: "chunk",
-                  content: data,
-                });
-              }
-            }
-          } else if (line.trim()) {
-            try {
-              const json = JSON.parse(line);
-              const content = json.content || json.chunk || json.response || "";
-              if (content) {
-                event.sender.send("tongue-analyze-stream-chunk", {
-                  type: "chunk",
-                  content: content,
-                });
-              }
-            } catch (e) {
-              if (line.trim()) {
-                event.sender.send("tongue-analyze-stream-chunk", {
-                  type: "chunk",
-                  content: line,
-                });
-              }
-            }
-          }
-        }
-      }
-    } catch (error: any) {
-      console.error("舌診分析流式服務錯誤:", error);
-
-      let errorMessage = "發生未知錯誤";
-
-      if (error.message) {
-        if (
-          error.message.includes("fetch failed") ||
-          error.message.includes("ECONNREFUSED")
-        ) {
-          errorMessage = `無法連接到 FastAPI 服務 (${FASTAPI_URL})，請確保服務正在運行`;
-        } else {
-          errorMessage = error.message;
-        }
-      }
-
+          additional_info: additionalInfo ?? null,
+        },
+        (data) => {
+          if (data.type === "chunk" && data.content)
+            send({ type: "chunk", content: data.content });
+          else if (data.type === "done") send({ type: "done" });
+          else if (data.type === "error" && data.error)
+            send({ type: "error", error: data.error });
+        },
+      );
+    } catch (error: unknown) {
+      const errorMessage = toIpcErrorMessage(error, FASTAPI_URL);
+      console.error("舌診分析流式服務錯誤:", errorMessage);
       event.sender.send("tongue-analyze-stream-chunk", {
         type: "error",
         error: errorMessage,
       });
     }
-  }
+  },
 );
