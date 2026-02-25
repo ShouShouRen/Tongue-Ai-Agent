@@ -16,7 +16,11 @@ export interface TonguePredictionResults {
 }
 
 export interface ElectronAPI {
-  sendChatMessage: (prompt: string, userId?: string, sessionId?: string) => Promise<{
+  sendChatMessage: (
+    prompt: string,
+    userId?: string,
+    sessionId?: string,
+  ) => Promise<{
     success: boolean;
     data?: string;
     error?: string;
@@ -27,11 +31,11 @@ export interface ElectronAPI {
     sessionId?: string,
     onChunk?: (chunk: string) => void,
     onComplete?: () => void,
-    onError?: (error: string) => void
+    onError?: (error: string) => void,
   ) => () => void;
   sendTongueAnalysis: (
     predictionResults: TonguePredictionResults | Record<string, unknown>,
-    additionalInfo?: string
+    additionalInfo?: string,
   ) => Promise<{
     success: boolean;
     data?: string;
@@ -42,8 +46,13 @@ export interface ElectronAPI {
     additionalInfo: string | undefined,
     onChunk: (chunk: string) => void,
     onComplete: () => void,
-    onError: (error: string) => void
+    onError: (error: string) => void,
   ) => () => void;
+  transcribeAudio: (audioData: Uint8Array) => Promise<{
+    success: boolean;
+    text?: string;
+    error?: string;
+  }>;
 }
 
 declare global {
@@ -51,4 +60,3 @@ declare global {
     electronAPI?: ElectronAPI;
   }
 }
-

@@ -1,9 +1,15 @@
 # config/settings.py
-from pydantic_settings import BaseSettings
 from pathlib import Path
 from typing import Optional
 
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
     # LLM 設定
     model_name: str = "qwen3:8b"
     ollama_base_url: str = "http://localhost:11434"
@@ -19,6 +25,11 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     cors_origins: list[str] = ["*"]
+
+    # 語音辨識：使用 Google Speech-to-Text（需設為 True 並設定下方憑證之一）
+    use_google_speech: bool = False
+    # API Key（請放在 .env，勿提交版本庫）。環境變數：GOOGLE_SPEECH_API_KEY
+    google_speech_api_key: Optional[str] = None
     
     # 日誌設定
     log_level: str = "INFO"

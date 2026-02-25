@@ -17,14 +17,153 @@ interface TongueAnalysisRequest {
   session_id?: string;
 }
 
-const isElectron = () => {
-  return typeof window !== "undefined" && window.electronAPI !== undefined;
-};
+/** 是否在 Electron 環境 */
+const isElectron = (): boolean =>
+  typeof window !== "undefined" && window.electronAPI !== undefined;
 
 const FASTAPI_URL = "http://localhost:8000";
 
+/** 從 JSON 取出內容欄位 */
+function getContentFromJson(json: Record<string, unknown>): string {
+  return (json.content ?? json.chunk ?? json.response ?? "") as string;
+}
+
+/** 解析單行 SSE data，回傳是否應結束串流 */
+function processSSEDataLine(
+  data: string,
+  callbacks: {
+    onChunk: (chunk: string) => void;
+    onComplete?: () => void;
+    onError: (error: string) => void;
+    onStatus?: (status: string) => void;
+  },
+): boolean {
+  if (data === "[DONE]") {
+    callbacks.onComplete?.();
+    return true;
+  }
+  try {
+    const json = JSON.parse(data) as Record<string, unknown>;
+    if (json.type === "status" && json.message && callbacks.onStatus) {
+      callbacks.onStatus(String(json.message));
+    }
+    if (json.type === "content" && json.content) {
+      callbacks.onChunk(String(json.content));
+    }
+    if (json.error) {
+      callbacks.onError(String(json.error));
+      return true;
+    }
+    const content = getContentFromJson(json);
+    if (content && !json.type) {
+      callbacks.onChunk(content);
+    }
+  } catch {
+    if (data.trim()) {
+      callbacks.onChunk(data);
+    }
+  }
+  return false;
+}
+
+/** 解析一般 JSON 行（無 "data: " 前綴）的內容 */
+function processJsonLine(line: string, onChunk: (chunk: string) => void): void {
+  try {
+    const json = JSON.parse(line) as Record<string, unknown>;
+    const content = getContentFromJson(json);
+    if (content) {
+      onChunk(content);
+    }
+  } catch {
+    if (line.trim()) {
+      onChunk(line);
+    }
+  }
+}
+
+/** 讀取 fetch Response 的 SSE 串流，依行呼叫 callbacks */
+async function readSSEStream(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  decoder: TextDecoder,
+  callbacks: {
+    onChunk: (chunk: string) => void;
+    onComplete: () => void;
+    onError: (error: string) => void;
+    onStatus?: (status: string) => void;
+  },
+): Promise<void> {
+  let buffer = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        callbacks.onComplete();
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+
+      for (const line of lines) {
+        if (line.startsWith("data: ")) {
+          const data = line.slice(6);
+          if (processSSEDataLine(data, callbacks)) return;
+        } else if (line.trim()) {
+          processJsonLine(line, callbacks.onChunk);
+        }
+      }
+    }
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : "讀取流時發生錯誤";
+    callbacks.onError(msg);
+  }
+}
+
+/** 將 File 或 base64 字串轉成 Blob 並 append 到 FormData */
+function appendImageToFormData(
+  formData: FormData,
+  imageFile: File | string,
+  fieldName = "file",
+): void {
+  if (imageFile instanceof File) {
+    formData.append(fieldName, imageFile);
+    return;
+  }
+  let mimeType = "image/jpeg";
+  let base64String = imageFile;
+  if (imageFile.startsWith("data:")) {
+    const matches = imageFile.match(/data:([^;]+);base64,(.+)/);
+    if (matches) {
+      mimeType = matches[1];
+      base64String = matches[2];
+    }
+  }
+  const byteCharacters = atob(base64String);
+  const byteArray = new Uint8Array(byteCharacters.length);
+  for (let i = 0; i < byteCharacters.length; i++) {
+    byteArray[i] = byteCharacters.charCodeAt(i);
+  }
+  formData.append(
+    fieldName,
+    new Blob([byteArray], { type: mimeType }),
+    "tongue_image.jpg",
+  );
+}
+
+/** 將 fetch 錯誤轉成使用者可讀訊息 */
+function toFetchErrorMessage(error: unknown, baseUrl: string): string {
+  if (!(error instanceof Error)) return "發生未知錯誤";
+  if (
+    error.message?.includes("fetch failed") ||
+    error.message?.includes("ECONNREFUSED")
+  ) {
+    return `無法連接到 FastAPI 服務 (${baseUrl})，請確保服務正在運行`;
+  }
+  return error.message || "發生未知錯誤";
+}
+
 const makeBrowserRequest = async (
-  message: PromptRequest
+  message: PromptRequest,
 ): Promise<PromptResponse> => {
   const response = await fetch(`${FASTAPI_URL}/chat`, {
     method: "POST",
@@ -39,20 +178,25 @@ const makeBrowserRequest = async (
   });
 
   if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
+    const errorData = (await response.json().catch(() => ({}))) as {
+      detail?: string;
+    };
     throw new Error(
-      errorData.detail || `API 請求失敗 (狀態碼: ${response.status})`
+      errorData.detail || `API 請求失敗 (狀態碼: ${response.status})`,
     );
   }
 
-  const data = await response.json();
+  const data = (await response.json()) as {
+    response?: string;
+    answer?: string;
+  };
   return {
     data: data.response || data.answer || "沒有收到回應",
   };
 };
 
 const makeElectronRequest = async (
-  message: PromptRequest
+  message: PromptRequest,
 ): Promise<PromptResponse> => {
   if (!window.electronAPI) {
     throw new Error("Electron API 不可用");
@@ -61,7 +205,7 @@ const makeElectronRequest = async (
   const response = await window.electronAPI.sendChatMessage(
     message.prompt,
     message.user_id,
-    message.session_id
+    message.session_id,
   );
 
   if (!response.success) {
@@ -74,7 +218,7 @@ const makeElectronRequest = async (
 };
 
 export const makeRequest = async (
-  message: PromptRequest
+  message: PromptRequest,
 ): Promise<PromptResponse> => {
   if (isElectron()) {
     return makeElectronRequest(message);
@@ -87,7 +231,7 @@ export const makeStreamRequest = async (
   message: PromptRequest,
   onChunk: (chunk: string) => void,
   onComplete: () => void,
-  onError: (error: string) => void
+  onError: (error: string) => void,
 ): Promise<() => void> => {
   if (isElectron() && window.electronAPI?.sendChatMessageStream) {
     const electronAPI = window.electronAPI;
@@ -97,7 +241,7 @@ export const makeStreamRequest = async (
       message.session_id,
       onChunk,
       onComplete,
-      onError
+      onError,
     );
   } else {
     try {
@@ -116,105 +260,29 @@ export const makeStreamRequest = async (
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
         onError(
-          errorData.detail || `API 請求失敗 (狀態碼: ${response.status})`
+          (errorData as { detail?: string }).detail ||
+            `API 請求失敗 (狀態碼: ${response.status})`,
         );
         return () => {};
       }
 
       const reader = response.body?.getReader();
       const decoder = new TextDecoder();
-
       if (!reader) {
         onError("無法讀取響應流");
         return () => {};
       }
-
-      let buffer = "";
-
-      const readStream = async () => {
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-
-            if (done) {
-              onComplete();
-              break;
-            }
-
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split("\n");
-            buffer = lines.pop() || "";
-
-            for (const line of lines) {
-              if (line.startsWith("data: ")) {
-                const data = line.slice(6);
-                if (data === "[DONE]") {
-                  onComplete();
-                  return;
-                }
-
-                try {
-                  const json = JSON.parse(data);
-                  const content =
-                    json.content || json.chunk || json.response || "";
-                  if (content) {
-                    onChunk(content);
-                  }
-                } catch (e) {
-                  if (data.trim()) {
-                    onChunk(data);
-                  }
-                }
-              } else if (line.trim()) {
-                try {
-                  const json = JSON.parse(line);
-                  const content =
-                    json.content || json.chunk || json.response || "";
-                  if (content) {
-                    onChunk(content);
-                  }
-                } catch (e) {
-                  if (line.trim()) {
-                    onChunk(line);
-                  }
-                }
-              }
-            }
-          }
-        } catch (error: unknown) {
-          const errorMessage =
-            error instanceof Error ? error.message : "讀取流時發生錯誤";
-          onError(errorMessage);
-        }
-      };
-
-      readStream();
-
-      return () => {
-        reader.cancel();
-      };
+      readSSEStream(reader, decoder, { onChunk, onComplete, onError });
+      return () => reader.cancel();
     } catch (error: unknown) {
-      if (error instanceof Error) {
-        if (
-          error.message?.includes("fetch failed") ||
-          error.message?.includes("ECONNREFUSED")
-        ) {
-          onError(
-            `無法連接到 FastAPI 服務 (${FASTAPI_URL})，請確保服務正在運行`
-          );
-        } else {
-          onError(error.message || "發生未知錯誤");
-        }
-      } else {
-        onError("發生未知錯誤");
-      }
+      onError(toFetchErrorMessage(error, FASTAPI_URL));
       return () => {};
     }
   }
 };
 
 const makeBrowserTongueAnalysis = async (
-  request: TongueAnalysisRequest
+  request: TongueAnalysisRequest,
 ): Promise<PromptResponse> => {
   const response = await fetch(`${FASTAPI_URL}/tongue/analyze`, {
     method: "POST",
@@ -230,20 +298,22 @@ const makeBrowserTongueAnalysis = async (
   });
 
   if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
+    const errorData = (await response.json().catch(() => ({}))) as {
+      detail?: string;
+    };
     throw new Error(
-      errorData.detail || `API 請求失敗 (狀態碼: ${response.status})`
+      errorData.detail || `API 請求失敗 (狀態碼: ${response.status})`,
     );
   }
 
-  const data = await response.json();
+  const data = (await response.json()) as { response?: string };
   return {
     data: data.response || "沒有收到回應",
   };
 };
 
 const makeElectronTongueAnalysis = async (
-  request: TongueAnalysisRequest
+  request: TongueAnalysisRequest,
 ): Promise<PromptResponse> => {
   if (!window.electronAPI) {
     throw new Error("Electron API 不可用");
@@ -251,7 +321,7 @@ const makeElectronTongueAnalysis = async (
 
   const response = await window.electronAPI.sendTongueAnalysis(
     request.prediction_results,
-    request.additional_info
+    request.additional_info,
   );
 
   if (!response.success) {
@@ -264,7 +334,7 @@ const makeElectronTongueAnalysis = async (
 };
 
 export const analyzeTongue = async (
-  request: TongueAnalysisRequest
+  request: TongueAnalysisRequest,
 ): Promise<PromptResponse> => {
   if (isElectron()) {
     return makeElectronTongueAnalysis(request);
@@ -285,55 +355,23 @@ const makeBrowserImagePredictAndAnalyze = async (
   onChunk: (chunk: string) => void,
   onStatus?: (status: string) => void,
   onComplete: () => void = () => {},
-  onError: (error: string) => void = () => {}
+  onError: (error: string) => void = () => {},
 ): Promise<() => void> => {
   try {
     const formData = new FormData();
-
-    if (request.imageFile instanceof File) {
-      formData.append("file", request.imageFile);
-    } else {
-      const base64Data = request.imageFile;
-      let mimeType = "image/jpeg";
-      let base64String = base64Data;
-
-      if (base64Data.startsWith("data:")) {
-        const matches = base64Data.match(/data:([^;]+);base64,(.+)/);
-        if (matches) {
-          mimeType = matches[1];
-          base64String = matches[2];
-        }
-      }
-
-      const byteCharacters = atob(base64String);
-      const byteNumbers = new Array(byteCharacters.length);
-      for (let i = 0; i < byteCharacters.length; i++) {
-        byteNumbers[i] = byteCharacters.charCodeAt(i);
-      }
-      const byteArray = new Uint8Array(byteNumbers);
-      const blob = new Blob([byteArray], { type: mimeType });
-
-      formData.append("file", blob, "tongue_image.jpg");
-    }
-
+    appendImageToFormData(formData, request.imageFile);
     if (request.additional_info) {
       formData.append("additional_info", request.additional_info);
     }
-    
-    if (request.user_id) {
-      formData.append("user_id", request.user_id);
-    }
-    
-    if (request.session_id) {
-      formData.append("session_id", request.session_id);
-    }
+    if (request.user_id) formData.append("user_id", request.user_id);
+    if (request.session_id) formData.append("session_id", request.session_id);
 
     const response = await fetch(
       `${FASTAPI_URL}/tongue/predict-and-analyze/stream`,
       {
         method: "POST",
         body: formData,
-      }
+      },
     );
 
     if (!response.ok) {
@@ -359,103 +397,19 @@ const makeBrowserImagePredictAndAnalyze = async (
 
     const reader = response.body?.getReader();
     const decoder = new TextDecoder();
-
     if (!reader) {
       onError("無法讀取響應流");
       return () => {};
     }
-
-    let buffer = "";
-
-    const readStream = async () => {
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-
-          if (done) {
-            onComplete();
-            break;
-          }
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-
-          for (const line of lines) {
-            if (line.startsWith("data: ")) {
-              const data = line.slice(6);
-              if (data === "[DONE]") {
-                onComplete();
-                return;
-              }
-
-              try {
-                const json = JSON.parse(data);
-
-                if (json.type === "status" && json.message && onStatus) {
-                  onStatus(json.message);
-                }
-
-                if (json.type === "content" && json.content) {
-                  onChunk(json.content);
-                }
-
-                if (json.error) {
-                  onError(json.error);
-                  return;
-                }
-
-                const content =
-                  json.content || json.chunk || json.response || "";
-                if (content && !json.type) {
-                  onChunk(content);
-                }
-              } catch (e: unknown) {
-                if (data.trim()) {
-                  onChunk(data);
-                }
-              }
-            } else if (line.trim()) {
-              try {
-                const json = JSON.parse(line);
-                const content =
-                  json.content || json.chunk || json.response || "";
-                if (content) {
-                  onChunk(content);
-                }
-              } catch (e: unknown) {
-                if (line.trim()) {
-                  onChunk(line);
-                }
-              }
-            }
-          }
-        }
-      } catch (error: unknown) {
-        const errorMessage =
-          error instanceof Error ? error.message : "讀取流時發生錯誤";
-        onError(errorMessage);
-      }
-    };
-
-    readStream();
-
-    return () => {
-      reader.cancel();
-    };
+    readSSEStream(reader, decoder, {
+      onChunk,
+      onComplete,
+      onError,
+      onStatus,
+    });
+    return () => reader.cancel();
   } catch (error: unknown) {
-    if (error instanceof Error) {
-      if (
-        error.message?.includes("fetch failed") ||
-        error.message?.includes("ECONNREFUSED")
-      ) {
-        onError(`無法連接到 FastAPI 服務 (${FASTAPI_URL})，請確保服務正在運行`);
-      } else {
-        onError(error.message || "發生未知錯誤");
-      }
-    } else {
-      onError("發生未知錯誤");
-    }
+    onError(toFetchErrorMessage(error, FASTAPI_URL));
     return () => {};
   }
 };
@@ -465,14 +419,14 @@ export const predictAndAnalyzeTongueImage = async (
   onChunk: (chunk: string) => void,
   onStatus?: (status: string) => void,
   onComplete?: () => void,
-  onError?: (error: string) => void
+  onError?: (error: string) => void,
 ): Promise<() => void> => {
   return makeBrowserImagePredictAndAnalyze(
     request,
     onChunk,
     onStatus,
     onComplete || (() => {}),
-    onError || (() => {})
+    onError || (() => {}),
   );
 };
 
@@ -481,51 +435,16 @@ const makeBrowserAgentChat = async (
   onChunk: (chunk: string) => void,
   onStatus?: (status: string) => void,
   onComplete: () => void = () => {},
-  onError: (error: string) => void = () => {}
+  onError: (error: string) => void = () => {},
 ): Promise<() => void> => {
   try {
     const formData = new FormData();
-
-    if (request.imageFile instanceof File) {
-      formData.append("file", request.imageFile);
-    } else if (request.imageFile) {
-      const base64Data = request.imageFile;
-      let mimeType = "image/jpeg";
-      let base64String = base64Data;
-
-      if (base64Data.startsWith("data:")) {
-        const matches = base64Data.match(/data:([^;]+);base64,(.+)/);
-        if (matches) {
-          mimeType = matches[1];
-          base64String = matches[2];
-        }
-      }
-
-      const byteCharacters = atob(base64String);
-      const byteNumbers = new Array(byteCharacters.length);
-      for (let i = 0; i < byteCharacters.length; i++) {
-        byteNumbers[i] = byteCharacters.charCodeAt(i);
-      }
-      const byteArray = new Uint8Array(byteNumbers);
-      const blob = new Blob([byteArray], { type: mimeType });
-
-      formData.append("file", blob, "tongue_image.jpg");
+    if (request.imageFile) {
+      appendImageToFormData(formData, request.imageFile);
     }
-
-    if (request.prompt || request.additional_info) {
-      formData.append(
-        "prompt",
-        request.prompt || request.additional_info || ""
-      );
-    }
-    
-    if (request.user_id) {
-      formData.append("user_id", request.user_id);
-    }
-    
-    if (request.session_id) {
-      formData.append("session_id", request.session_id);
-    }
+    formData.append("prompt", request.prompt ?? request.additional_info ?? "");
+    if (request.user_id) formData.append("user_id", request.user_id);
+    if (request.session_id) formData.append("session_id", request.session_id);
 
     const response = await fetch(`${FASTAPI_URL}/agent/chat/stream`, {
       method: "POST",
@@ -555,103 +474,19 @@ const makeBrowserAgentChat = async (
 
     const reader = response.body?.getReader();
     const decoder = new TextDecoder();
-
     if (!reader) {
       onError("無法讀取響應流");
       return () => {};
     }
-
-    let buffer = "";
-
-    const readStream = async () => {
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-
-          if (done) {
-            onComplete();
-            break;
-          }
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-
-          for (const line of lines) {
-            if (line.startsWith("data: ")) {
-              const data = line.slice(6);
-              if (data === "[DONE]") {
-                onComplete();
-                return;
-              }
-
-              try {
-                const json = JSON.parse(data);
-
-                if (json.type === "status" && json.message && onStatus) {
-                  onStatus(json.message);
-                }
-
-                if (json.type === "content" && json.content) {
-                  onChunk(json.content);
-                }
-
-                if (json.error) {
-                  onError(json.error);
-                  return;
-                }
-
-                const content =
-                  json.content || json.chunk || json.response || "";
-                if (content && !json.type) {
-                  onChunk(content);
-                }
-              } catch (e) {
-                if (data.trim()) {
-                  onChunk(data);
-                }
-              }
-            } else if (line.trim()) {
-              try {
-                const json = JSON.parse(line);
-                const content =
-                  json.content || json.chunk || json.response || "";
-                if (content) {
-                  onChunk(content);
-                }
-              } catch (e) {
-                if (line.trim()) {
-                  onChunk(line);
-                }
-              }
-            }
-          }
-        }
-      } catch (error: unknown) {
-        const errorMessage =
-          error instanceof Error ? error.message : "讀取流時發生錯誤";
-        onError(errorMessage);
-      }
-    };
-
-    readStream();
-
-    return () => {
-      reader.cancel();
-    };
+    readSSEStream(reader, decoder, {
+      onChunk,
+      onComplete,
+      onError,
+      onStatus,
+    });
+    return () => reader.cancel();
   } catch (error: unknown) {
-    if (error instanceof Error) {
-      if (
-        error.message?.includes("fetch failed") ||
-        error.message?.includes("ECONNREFUSED")
-      ) {
-        onError(`無法連接到 FastAPI 服務 (${FASTAPI_URL})，請確保服務正在運行`);
-      } else {
-        onError(error.message || "發生未知錯誤");
-      }
-    } else {
-      onError("發生未知錯誤");
-    }
+    onError(toFetchErrorMessage(error, FASTAPI_URL));
     return () => {};
   }
 };
@@ -661,14 +496,14 @@ export const agentChat = async (
   onChunk: (chunk: string) => void,
   onStatus?: (status: string) => void,
   onComplete?: () => void,
-  onError?: (error: string) => void
+  onError?: (error: string) => void,
 ): Promise<() => void> => {
   return makeBrowserAgentChat(
     request,
     onChunk,
     onStatus,
     onComplete || (() => {}),
-    onError || (() => {})
+    onError || (() => {}),
   );
 };
 
@@ -676,7 +511,7 @@ export const analyzeTongueStream = async (
   request: TongueAnalysisRequest,
   onChunk: (chunk: string) => void,
   onComplete: () => void,
-  onError: (error: string) => void
+  onError: (error: string) => void,
 ): Promise<() => void> => {
   if (isElectron() && window.electronAPI?.sendTongueAnalysisStream) {
     const electronAPI = window.electronAPI;
@@ -685,7 +520,7 @@ export const analyzeTongueStream = async (
       request.additional_info,
       onChunk,
       onComplete,
-      onError
+      onError,
     );
   } else {
     try {
@@ -700,99 +535,57 @@ export const analyzeTongueStream = async (
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
         onError(
-          errorData.detail || `API 請求失敗 (狀態碼: ${response.status})`
+          (errorData as { detail?: string }).detail ||
+            `API 請求失敗 (狀態碼: ${response.status})`,
         );
         return () => {};
       }
 
       const reader = response.body?.getReader();
       const decoder = new TextDecoder();
-
       if (!reader) {
         onError("無法讀取響應流");
         return () => {};
       }
-
-      let buffer = "";
-
-      const readStream = async () => {
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-
-            if (done) {
-              onComplete();
-              break;
-            }
-
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split("\n");
-            buffer = lines.pop() || "";
-
-            for (const line of lines) {
-              if (line.startsWith("data: ")) {
-                const data = line.slice(6);
-                if (data === "[DONE]") {
-                  onComplete();
-                  return;
-                }
-
-                try {
-                  const json = JSON.parse(data);
-                  const content =
-                    json.content || json.chunk || json.response || "";
-                  if (content) {
-                    onChunk(content);
-                  }
-                } catch (e) {
-                  if (data.trim()) {
-                    onChunk(data);
-                  }
-                }
-              } else if (line.trim()) {
-                try {
-                  const json = JSON.parse(line);
-                  const content =
-                    json.content || json.chunk || json.response || "";
-                  if (content) {
-                    onChunk(content);
-                  }
-                } catch (e) {
-                  if (line.trim()) {
-                    onChunk(line);
-                  }
-                }
-              }
-            }
-          }
-        } catch (error: unknown) {
-          const errorMessage =
-            error instanceof Error ? error.message : "讀取流時發生錯誤";
-          onError(errorMessage);
-        }
-      };
-
-      readStream();
-
-      return () => {
-        reader.cancel();
-      };
+      readSSEStream(reader, decoder, { onChunk, onComplete, onError });
+      return () => reader.cancel();
     } catch (error: unknown) {
-      if (error instanceof Error) {
-        if (
-          error.message?.includes("fetch failed") ||
-          error.message?.includes("ECONNREFUSED")
-        ) {
-          onError(
-            `無法連接到 FastAPI 服務 (${FASTAPI_URL})，請確保服務正在運行`
-          );
-        } else {
-          onError(error.message || "發生未知錯誤");
-        }
-      } else {
-        onError("發生未知錯誤");
-      }
+      onError(toFetchErrorMessage(error, FASTAPI_URL));
       return () => {};
     }
   }
+};
+
+/** 從 FastAPI /transcribe 取得音訊轉文字（Google Speech-to-Text） */
+export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
+  if (isElectron() && window.electronAPI?.transcribeAudio) {
+    // Electron：由 main process 代為請求 /transcribe
+    const arrayBuffer = await audioBlob.arrayBuffer();
+    const uint8Array = new Uint8Array(arrayBuffer);
+    const result = await window.electronAPI.transcribeAudio(uint8Array);
+    if (!result.success) {
+      throw new Error(result.error || "語音轉文字失敗");
+    }
+    return result.text ?? "";
+  }
+
+  // 瀏覽器模式：直接 fetch
+  const formData = new FormData();
+  formData.append("file", audioBlob, "audio.webm");
+
+  const response = await fetch(`${FASTAPI_URL}/transcribe`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(
+      (err as { detail?: string }).detail ||
+        `語音轉文字失敗 (${response.status})`,
+    );
+  }
+
+  const data = (await response.json()) as { text?: string };
+  return data.text ?? "";
 };

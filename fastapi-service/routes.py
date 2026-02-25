@@ -1,12 +1,14 @@
 # routes.py
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-from typing import Optional, Dict, Any, List
+import asyncio
 import json
 import os
-import tempfile
 import shutil
+import tempfile
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from langchain_core.messages import HumanMessage
 
@@ -20,6 +22,89 @@ chat_router = APIRouter()
 tongue_router = APIRouter()
 agent_router = APIRouter()
 memory_router = APIRouter()
+
+# ==================== 語音辨識（Google Speech-to-Text） ====================
+
+
+def _transcribe_google_rest_sync(file_path: str, api_key: str) -> str:
+    """使用 Google Speech-to-Text REST API + API Key 辨識。"""
+    import base64
+    import urllib.request
+    import json
+    with open(file_path, "rb") as f:
+        content_b64 = base64.b64encode(f.read()).decode("utf-8")
+    body = json.dumps({
+        "config": {
+            "encoding": "WEBM_OPUS",
+            "sampleRateHertz": 48000,
+            "languageCode": "zh-TW",
+            "enableAutomaticPunctuation": True,
+        },
+        "audio": {"content": content_b64},
+    }).encode("utf-8")
+    url = f"https://speech.googleapis.com/v1/speech:recognize?key={api_key}"
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        raise RuntimeError(f"Google Speech API 請求失敗: {e}") from e
+    if "results" not in data:
+        return ""
+    return " ".join(
+        r["alternatives"][0]["transcript"].strip()
+        for r in data["results"]
+        if r.get("alternatives")
+    ).strip()
+
+
+def _transcribe_google_sdk_sync(file_path: str) -> str:
+    """使用 Google Cloud SDK（服務帳戶）辨識。"""
+    from google.cloud import speech
+    with open(file_path, "rb") as f:
+        content = f.read()
+    client = speech.SpeechClient()
+    audio = speech.RecognitionAudio(content=content)
+    config = speech.RecognitionConfig(
+        encoding=speech.RecognitionConfig.AudioEncoding.WEBM_OPUS,
+        sample_rate_hertz=48000,
+        language_code="zh-TW",
+        enable_automatic_punctuation=True,
+    )
+    response = client.recognize(config=config, audio=audio)
+    return " ".join(
+        result.alternatives[0].transcript.strip()
+        for result in response.results
+        if result.alternatives
+    ).strip()
+
+
+def _should_use_google_speech() -> bool:
+    if not getattr(settings, "use_google_speech", False):
+        return False
+    if getattr(settings, "google_speech_api_key", None):
+        return True
+    if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+        return True
+    return False
+
+
+def _get_google_speech_api_key() -> Optional[str]:
+    return getattr(settings, "google_speech_api_key", None) or os.environ.get("GOOGLE_SPEECH_API_KEY") or None
+
+
+async def transcribe_audio_file(file_path: str) -> str:
+    """非同步語音轉文字（僅使用 Google Speech-to-Text）。"""
+    if not _should_use_google_speech():
+        raise RuntimeError(
+            "語音辨識需設定 Google：在 .env 設 USE_GOOGLE_SPEECH=true 與 GOOGLE_SPEECH_API_KEY=你的金鑰"
+        )
+    loop = asyncio.get_event_loop()
+    api_key = _get_google_speech_api_key()
+    if api_key:
+        return await loop.run_in_executor(None, _transcribe_google_rest_sync, file_path, api_key)
+    return await loop.run_in_executor(None, _transcribe_google_sdk_sync, file_path)
 
 # 初始化 Agents（這些會在 main.py 中初始化，但這裡需要訪問）
 # 我們將通過依賴注入的方式傳遞

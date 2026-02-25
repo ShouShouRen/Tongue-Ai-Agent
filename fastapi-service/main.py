@@ -1,11 +1,24 @@
 import uvicorn
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, HTTPException, Body
+from fastapi import FastAPI, Depends, HTTPException, Body, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
+import logging
+import os
+import shutil
+import tempfile
+
+# 靜音不明 WebSocket 連線的 403 log（來自外部工具/擴充套件，如 Open WebUI）
+class _SuppressWSFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return not ("/ws" in msg and ("403" in msg or "connection rejected" in msg or "connection closed" in msg))
+
+logging.getLogger("uvicorn.access").addFilter(_SuppressWSFilter())
+logging.getLogger("uvicorn.error").addFilter(_SuppressWSFilter())
 
 from database import get_db, engine
 from config.models import Base, DiagnosisRecord
@@ -18,12 +31,13 @@ from agents import create_unified_agent, AgentMode
 from utils.memory_manager import get_memory_manager
 from utils.vision_loader import VisionPredictLoader
 from routes import (
-    chat_router, 
-    tongue_router, 
-    agent_router, 
-    memory_router, 
-    set_agents, 
-    set_vision_loader
+    chat_router,
+    tongue_router,
+    agent_router,
+    memory_router,
+    set_agents,
+    set_vision_loader,
+    transcribe_audio_file,
 )
 
 # 初始化資料庫 (建立 Table)
@@ -49,6 +63,12 @@ async def lifespan(app: FastAPI):
         set_agents(agents)
         
         print("Components initialized successfully.")
+        if getattr(settings, "use_google_speech", False) and (
+            getattr(settings, "google_speech_api_key", None) or os.environ.get("GOOGLE_SPEECH_API_KEY")
+        ):
+            print("語音辨識：Google Speech-to-Text")
+        else:
+            print("語音辨識：請在 .env 設定 USE_GOOGLE_SPEECH=true 與 GOOGLE_SPEECH_API_KEY")
     except Exception as e:
         print(f"Error initializing components: {e}")
         # We don't raise here to allow the server to start even if some components fail,
@@ -59,7 +79,7 @@ async def lifespan(app: FastAPI):
     # Shutdown logic
     print("Shutting down...")
 
-app = FastAPI(title="Tongue AI Agent API", lifespan=lifespan)
+app = FastAPI(title="Tongue AI Agent API", lifespan=lifespan, redirect_slashes=False)
 
 # CORS Configuration
 app.add_middleware(
@@ -75,6 +95,22 @@ app.include_router(chat_router, prefix="/chat", tags=["Chat"])
 app.include_router(tongue_router, prefix="/tongue", tags=["Tongue Analysis"])
 app.include_router(agent_router, prefix="/agent", tags=["Agent"])
 app.include_router(memory_router, prefix="/memory", tags=["Memory"])
+
+@app.post("/transcribe", tags=["Transcribe"])
+async def transcribe_audio_endpoint(file: UploadFile = File(...)):
+    """語音轉文字（Google Speech-to-Text）"""
+    try:
+        suffix = os.path.splitext(file.filename or "audio.webm")[1] or ".webm"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            shutil.copyfileobj(file.file, tmp)
+            tmp_path = tmp.name
+        try:
+            text = await transcribe_audio_file(tmp_path)
+            return {"text": text}
+        finally:
+            os.unlink(tmp_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"語音轉文字失敗: {str(e)}")
 
 # ==================== Existing Simple Endpoints ====================
 
