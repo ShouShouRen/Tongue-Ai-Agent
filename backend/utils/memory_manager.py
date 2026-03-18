@@ -365,19 +365,36 @@ class MemoryManager:
     def get_user_context(self, user_id: str) -> str:
         """
         獲取用戶上下文信息（用於構建系統提示詞）
-        
+
         Returns:
             格式化的上下文字符串
         """
-        summary = self.long_term.get_user_memories_summary(user_id)
-        
+        from datetime import timedelta
         context_parts = []
-        
-        # 用戶偏好（如果有的話）
+
+        # 用戶偏好
+        summary = self.long_term.get_user_memories_summary(user_id)
         if summary["preferences"]:
             prefs = json.dumps(summary["preferences"], ensure_ascii=False, indent=2)
             context_parts.append(f"用戶偏好：\n{prefs}")
-        
+
+        # 過去 7 天的舌診記錄摘要
+        records = self.long_term.get_tongue_analysis_history(
+            user_id=user_id,
+            limit=7,
+            start_date=datetime.now() - timedelta(days=7),
+        )
+        if records:
+            lines = [f"以下是用戶過去 7 天的舌診分析紀錄（共 {len(records)} 筆）："]
+            for r in records:
+                date_str = r["created_at"][:10] if r["created_at"] else "未知日期"
+                positive = r.get("prediction_results", {}).get("positive", [])
+                symptoms = "、".join(
+                    p.get("chinese", p.get("english", "")) for p in positive
+                ) or "無明顯症狀"
+                lines.append(f"- {date_str}：{symptoms}")
+            context_parts.append("\n".join(lines))
+
         if context_parts:
             return "\n\n".join(context_parts)
         return ""

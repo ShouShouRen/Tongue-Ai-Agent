@@ -359,6 +359,37 @@ export const agentChat = async (
   );
 };
 
+export const fetchAdviceStream = async (
+  userId: string,
+  onChunk: (chunk: string) => void,
+  onComplete: () => void,
+  onError: (error: string) => void
+): Promise<() => void> => {
+  try {
+    const response = await fetch(`${API_BASE_URL}${ENDPOINTS.TONGUE_ADVICE_STREAM}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: userId }),
+    });
+
+    if (!response.ok) {
+      onError(await parseJsonErrorResponse(response, `API 請求失敗 (狀態碼: ${response.status})`));
+      return () => {};
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) {
+      onError("無法讀取響應流");
+      return () => {};
+    }
+
+    return parseSSEStream(reader, { onChunk, onComplete, onError });
+  } catch (error: unknown) {
+    handleConnectionError(error, API_BASE_URL, onError);
+    return () => {};
+  }
+};
+
 export const analyzeTongueStream = async (
   request: TongueAnalysisRequest,
   onChunk: (chunk: string) => void,

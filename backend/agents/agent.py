@@ -49,6 +49,8 @@ def _get_llm():
             model=settings.model_name,
             base_url=settings.ollama_base_url,
             temperature=settings.llm_temperature,
+            reasoning=False,
+            num_predict=1024,
         )
     return _llm
 

@@ -1,6 +1,8 @@
+import json
 import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, Body
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -194,10 +196,69 @@ async def get_ai_health_advice(req: AdviceRequest):
         
         response = await llm.ainvoke(messages)
         return {"advice": response.content}
-        
+
     except Exception as e:
         print(f"Error generating advice: {e}")
         return {"advice": "抱歉，生成建議時發生錯誤。"}
+
+
+@app.post("/api/tongue/advice/stream")
+async def get_ai_health_advice_stream(req: AdviceRequest):
+    """AI 健康建議串流接口"""
+    async def generate():
+        try:
+            memory_manager = get_memory_manager()
+            records = memory_manager.long_term.get_tongue_analysis_history(
+                user_id=req.user_id,
+                limit=10,
+                start_date=datetime.now() - timedelta(days=7)
+            )
+
+            if not records:
+                yield f"data: {json.dumps({'content': '目前沒有足夠的舌診紀錄來生成建議，請先上傳舌頭照片進行分析。'}, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+            symptom_counts = {}
+            for r in records:
+                results = r.get("prediction_results", {})
+                positive = results.get("positive", [])
+                for p in positive:
+                    name = p.get("chinese", p.get("english", ""))
+                    if name:
+                        symptom_counts[name] = symptom_counts.get(name, 0) + 1
+
+            top_symptoms = sorted(symptom_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+            symptom_str = ", ".join([f"{name}(出現{count}次)" for name, count in top_symptoms])
+
+            prompt = f"""
+            你是一位專業的中醫健康顧問。以下是用戶過去一週的舌診分析摘要：
+            最常出現的症狀：{symptom_str}
+            請根據這些症狀，給出 3 點具體、實用的生活與飲食調理建議。
+            請用條列式回答，語氣親切專業，不要過於冗長 (約 150-200 字)。
+            """
+
+            from agents.agent import _get_llm
+            from langchain_core.messages import HumanMessage, SystemMessage
+            llm = _get_llm()
+
+            messages = [
+                SystemMessage(content="你是一位專業的中醫健康顧問。"),
+                HumanMessage(content=prompt)
+            ]
+
+            async for chunk in llm.astream(messages):
+                if chunk.content:
+                    yield f"data: {json.dumps({'content': chunk.content}, ensure_ascii=False)}\n\n"
+
+            yield "data: [DONE]\n\n"
+
+        except Exception as e:
+            print(f"Error streaming advice: {e}")
+            yield f"data: {json.dumps({'error': '抱歉，生成建議時發生錯誤。'}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

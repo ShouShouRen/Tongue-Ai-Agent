@@ -44,7 +44,7 @@ class VisionPredictLoader:
                 print("✓ 成功導入 vision_predict.tongue_analysis_pipeline")
 
             # 檢查模型文件
-            segmentation_model = self.base_path / "swim_trasnformer_384.pth"
+            segmentation_model = self.base_path / "ukan_model.pth"
             classification_model = self.base_path / "Simple_convnext_base_fold3.pth"
 
             for label, path in [("分割模型", segmentation_model), ("分類模型", classification_model)]:
@@ -93,7 +93,7 @@ class VisionPredictLoader:
 
     def _create_wrapper(self, analyze_fn):
         """建立包裝函數"""
-        segmentation_model = self.base_path / "swim_trasnformer_384.pth"
+        segmentation_model = self.base_path / "ukan_model.pth"
         classification_model = self.base_path / "Simple_convnext_base_fold3.pth"
 
         def wrapper(image_path, output_format="structured", output_dir=None):

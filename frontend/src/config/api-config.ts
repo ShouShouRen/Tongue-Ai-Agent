@@ -9,4 +9,5 @@ export const ENDPOINTS = {
   TONGUE_PREDICT_AND_ANALYZE_STREAM: "/tongue/predict-and-analyze/stream",
   AGENT_CHAT_STREAM: "/agent/chat/stream",
   REALTIME_ANALYZE_FRAME: "/realtime/analyze-frame",
+  TONGUE_ADVICE_STREAM: "/api/tongue/advice/stream",
 } as const;

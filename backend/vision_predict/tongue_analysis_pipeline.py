@@ -6,30 +6,37 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import torch
 import torchvision.transforms as T
-from .model import UNetWithSwinEncoder, SimpleTimmModel
+from .model import SimpleTimmModel
+from .ukan_archs import UKAN
 
 
-def segment_tongue(image_path, segmentation_model_path="swim_trasnformer_384.pth"):
-    """步驟1: 使用 UNet 分割舌頭"""
-    print("步驟 1/4: 分割舌頭...")
+def segment_tongue(image_path, segmentation_model_path="ukan_model.pth"):
+    """步驟1: 使用 UKAN 分割舌頭"""
+    print("步驟 1/4: 分割舌頭 (UKAN)...")
 
     THRESHOLD = 0.5
-    backbone = 'swin_base_patch4_window12_384'
+    INPUT_SIZE = 256
+    EMBED_DIMS = [128, 160, 256]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 預處理
+    # 預處理：Resize + /255（與訓練一致）
     transform = T.Compose([
-        T.Resize((384, 384)),
-        T.ToTensor(),
-        T.Normalize([0.5]*3, [0.5]*3),
+        T.Resize((INPUT_SIZE, INPUT_SIZE)),
+        T.ToTensor(),  # 自動 /255，輸出 [0,1]
     ])
 
-    # 載入分割模型
-    model = UNetWithSwinEncoder(backbone_name=backbone).to(device)
+    # 載入 UKAN 分割模型
+    model = UKAN(
+        num_classes=1,
+        input_channels=3,
+        deep_supervision=False,
+        img_size=INPUT_SIZE,
+        embed_dims=EMBED_DIMS,
+    ).to(device)
     model.load_state_dict(torch.load(segmentation_model_path, map_location=device, weights_only=False))
     model.eval()
 
-    # 讀取圖片
+    # 讀取圖片（PIL RGB）
     image = Image.open(image_path).convert("RGB")
     width, height = image.size
 
@@ -51,7 +58,7 @@ def segment_tongue(image_path, segmentation_model_path="swim_trasnformer_384.pth
     img_np = np.array(image)
     segmented_np = (img_np * mask_exp).astype(np.uint8)
 
-    print("  ✓ 舌頭分割完成")
+    print("  ✓ 舌頭分割完成 (UKAN)")
     return segmented_np, mask_resized, np.array(image)
 
 def extract_tongue_roi(segmented_image, mask):

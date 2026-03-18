@@ -1,4 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { fetchAdviceStream } from "../../api/api";
 import {
     Radar,
     RadarChart,
@@ -49,6 +52,7 @@ const WeeklyReportModal = ({
     // Advice State
     const [advice, setAdvice] = useState<string | null>(null);
     const [adviceLoading, setAdviceLoading] = useState(false);
+    const cancelAdviceRef = useRef<(() => void) | null>(null);
 
     useEffect(() => {
         if (isOpen && userId) {
@@ -94,29 +98,23 @@ const WeeklyReportModal = ({
     };
 
     const fetchAdvice = async () => {
-        setAdviceLoading(true);
-        try {
-            const response = await fetch("http://localhost:8000/api/tongue/advice", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({ user_id: userId })
-            });
-
-            if (!response.ok) {
-                throw new Error("無法獲取 AI 建議");
-            }
-
-            const result = await response.json();
-            setAdvice(result.advice);
-
-        } catch (err: any) {
-            console.error("獲取 AI 建議時發生錯誤:", err);
-            setAdvice("抱歉，目前無法生成建議，請稍後再試。");
-        } finally {
-            setAdviceLoading(false);
+        if (cancelAdviceRef.current) {
+            cancelAdviceRef.current();
         }
+        setAdviceLoading(true);
+        setAdvice("");
+
+        const cancel = await fetchAdviceStream(
+            userId,
+            (chunk) => setAdvice((prev) => (prev ?? "") + chunk),
+            () => setAdviceLoading(false),
+            (error) => {
+                console.error("獲取 AI 建議時發生錯誤:", error);
+                setAdvice("抱歉，目前無法生成建議，請稍後再試。");
+                setAdviceLoading(false);
+            }
+        );
+        cancelAdviceRef.current = cancel;
     };
 
     // Logic to get chart data based on view mode
@@ -287,7 +285,7 @@ const WeeklyReportModal = ({
 
                             {/* AI Advice Section */}
                             <div className="border-t border-gray-100 pt-5">
-                                {!advice ? (
+                                {advice === null ? (
                                     <button
                                         onClick={fetchAdvice}
                                         disabled={adviceLoading || data.length === 0}
@@ -308,11 +306,13 @@ const WeeklyReportModal = ({
                                             <Sparkles size={16} />
                                             AI 中醫建議
                                         </div>
-                                        <div className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap">
-                                            {advice}
+                                        <div className="text-sm text-gray-700 leading-relaxed prose prose-sm max-w-none prose-p:mb-1 prose-li:my-0 prose-ul:my-1 prose-ol:my-1">
+                                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                                {advice}
+                                            </ReactMarkdown>
                                         </div>
                                         <button
-                                            onClick={() => setAdvice(null)}
+                                            onClick={() => { setAdvice(null); fetchAdvice(); }}
                                             className="mt-3 text-xs text-orange-600 hover:text-orange-800 underline"
                                         >
                                             重新生成建議
