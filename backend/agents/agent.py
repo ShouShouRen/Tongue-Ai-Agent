@@ -15,6 +15,7 @@ from config.prompts import PromptTemplates
 from utils.vision_loader import VisionPredictLoader
 from utils.memory_manager import get_memory_manager
 from agents.message_helpers import build_system_message
+from utils.input_guard import is_injection_attempt, wrap_user_input, INJECTION_REFUSAL
 
 # 定義 Agent 狀態
 class AgentState(TypedDict):
@@ -140,10 +141,40 @@ def _create_predict_tongue_image_tool():
 
 
 # Agent 節點函數
+def _guard_and_wrap_messages(messages: list) -> tuple[list, bool]:
+    """
+    檢測最後一條 HumanMessage 是否為注入攻擊，
+    若安全則包裝為不可信內容標記。
+    回傳 (處理後的 messages, is_injection)
+    """
+    last_human_idx = None
+    for i in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[i], HumanMessage):
+            last_human_idx = i
+            break
+
+    if last_human_idx is None:
+        return messages, False
+
+    user_text = messages[last_human_idx].content
+    if is_injection_attempt(user_text):
+        return messages, True
+
+    wrapped = list(messages)
+    wrapped[last_human_idx] = HumanMessage(content=wrap_user_input(user_text))
+    return wrapped, False
+
+
 def agent_node(state: AgentState) -> AgentState:
     """Agent 節點 - 可以調用工具"""
-    messages = state["messages"]
-    
+    messages = list(state["messages"])
+
+    # 注入檢測
+    messages, injected = _guard_and_wrap_messages(messages)
+    if injected:
+        from langchain_core.messages import AIMessage
+        return {"messages": [AIMessage(content=INJECTION_REFUSAL)]}
+
     # 如果沒有系統消息，添加系統提示詞
     has_system_message = any(isinstance(msg, SystemMessage) for msg in messages)
     if not has_system_message:
@@ -152,11 +183,11 @@ def agent_node(state: AgentState) -> AgentState:
         )
         system_msg = build_system_message(base_prompt, state.get("memory_context"))
         messages = [system_msg] + messages
-    
+
     # 調用 LLM（帶工具）
     llm_with_tools = _get_llm_with_tools()
     response = llm_with_tools.invoke(messages)
-    
+
     return {"messages": [response]}
 
 
@@ -231,10 +262,15 @@ def should_continue(state: AgentState) -> str:
 
 def analyze_tongue_node(state: AgentState) -> AgentState:
     """分析舌診預測結果的節點"""
+    additional_info = state.get('additional_info')
+    # 若 additional_info 含注入嘗試則直接捨棄
+    if additional_info and is_injection_attempt(additional_info):
+        additional_info = None
+
     # 構建分析提示詞
     analysis_prompt = PromptTemplates.build_analysis_prompt(
         prediction_results=state.get('prediction_results', {}),
-        additional_info=state.get('additional_info')
+        additional_info=additional_info
     )
     
     # 調用 LLM
@@ -255,14 +291,22 @@ def analyze_tongue_node(state: AgentState) -> AgentState:
 
 def chat_node(state: AgentState) -> AgentState:
     """一般聊天的節點"""
-    messages = list(state["messages"])  # 創建副本以避免修改原始列表
-    
+    messages = list(state["messages"])
+
+    # 注入檢測
+    messages, injected = _guard_and_wrap_messages(messages)
+    if injected:
+        from langchain_core.messages import AIMessage
+        return {
+            "messages": [AIMessage(content=INJECTION_REFUSAL)],
+            "final_response": INJECTION_REFUSAL
+        }
+
     # 檢查是否已經有系統消息
     has_system_message = any(isinstance(msg, SystemMessage) for msg in messages)
-    
-    # 準備要返回的消息列表
+
     messages_to_return = []
-    
+
     # 如果沒有系統消息，添加系統提示詞（只在第一次會話時）
     if not has_system_message:
         base_prompt = PromptTemplates.CHAT_SYSTEM.format(
@@ -271,15 +315,13 @@ def chat_node(state: AgentState) -> AgentState:
         system_msg = build_system_message(base_prompt, state.get("memory_context"))
         messages_to_return.append(system_msg)
         messages = [system_msg] + messages
-    
+
     # 調用 LLM（使用完整的消息歷史，checkpointer 會自動管理）
     llm = _get_llm()
     response = llm.invoke(messages)
-    
-    # 將響應添加到返回列表
+
     messages_to_return.append(response)
-    
-    # 返回新消息（LangGraph 會自動通過 add_messages reducer 合併）
+
     return {
         "messages": messages_to_return,
         "final_response": response.content if hasattr(response, 'content') else str(response)
