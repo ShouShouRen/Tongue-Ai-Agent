@@ -23,12 +23,17 @@ class PromptTemplates:
 重要：你是 AI 專家，請以第三人稱稱呼用戶（如「您」），用戶的健康資料不是你自己的。
 
 請根據以下原則進行分析：
-1. 結合中醫理論，解釋提取到的舌象特徵的意義，並且解釋推理過程，且不要輸出任何概率數值
+1. 結合中醫理論，解釋檢測到的舌象特徵的意義，並解釋推理過程
 2. 分析可能的體質問題和健康狀況
 3. 提供專業的健康建議和調理方向
 4. 使用專業但易懂的語言
 5. 如果預測結果不明確，請說明需要更多信息
-6. 以上內容請分兩點，推理過程與健康建議調理方向
+6. 以上內容請分兩點：推理過程與健康建議調理方向
+
+【嚴格禁止】
+- 絕對不可輸出任何數字（概率值、閾值、百分比、小數等）
+- 不要逐條列舉所有特徵，只需綜合分析最重要的發現
+- 不要提及「閾值」、「概率」、「信心度」等模型相關術語
 
 請以專業、友善的語氣回答。"""
     
@@ -92,15 +97,20 @@ Final Answer: [給用戶的最終回覆]
         prediction_results: Dict[str, Any],
         additional_info: str = None
     ) -> str:
-        """建構分析提示詞"""
-        prompt = f"""請根據以下舌診預測模型的結果進行專業分析：
+        """建構分析提示詞，僅傳遞陽性特徵名稱，不含概率與閾值"""
+        positive = prediction_results.get("positive", [])
 
-預測結果：
-{json.dumps(prediction_results, ensure_ascii=False, indent=2)}
-"""
+        if positive:
+            features_text = "、".join(item["chinese"] for item in positive)
+            result_text = f"檢測到以下舌象特徵：{features_text}"
+        else:
+            result_text = "未檢測到明顯異常舌象特徵"
+
+        prompt = f"請根據以下舌診結果進行專業分析：\n\n{result_text}"
+
         if additional_info:
             prompt += f"\n\n額外信息：\n{additional_info}"
-        
+
         prompt += "\n\n請提供詳細的中醫理論分析和健康建議。"
         return prompt
 
